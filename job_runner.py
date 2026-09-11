@@ -40,6 +40,16 @@ def atomic_json(path: Path, data: Any) -> None:
     temporary.replace(path)
 
 
+def bind_ego_runtime_environment(environment: dict[str, str], runtime: dict[str, Any]) -> None:
+    """Bind Ego to the exact canonical target and marker created by browser_runtime.initialize."""
+    runtime_id = runtime.get("browserRuntimeId")
+    target_id = (runtime.get("targetBrowserIdentity") or {}).get("targetId")
+    if not runtime_id or not target_id:
+        raise RuntimeError("Canonical BrowserRuntime is missing Ego target identity")
+    environment["CVENT_BROWSER_RUNTIME_ID"] = str(runtime_id)
+    environment["CVENT_BROWSER_TARGET_ID"] = str(target_id)
+
+
 def append_log(directory: Path, message: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "activity.log").open("a") as output:
@@ -199,7 +209,6 @@ class JobRunner:
             "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
             "CVENT_PI_PROVIDER": pi_provider(), "CVENT_PI_MODEL": pi_model(),
             "CVENT_PYTHON": sys.executable,
-            "CVENT_BROWSER_TARGET_ID": "cvent-agent-browser-target",
             "PI_CODING_AGENT_DIR": str(directory / "pi-config"), "PI_CODING_AGENT_SESSION_DIR": str(directory / "pi-sessions"),
             "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
         })
@@ -321,8 +330,7 @@ class JobRunner:
             )
             BrowserGate(directory).initialize()
             environment = self.pi_environment(job, active.token, active.slot_id)
-            environment["CVENT_BROWSER_RUNTIME_ID"] = runtime["runtimeId"]
-            environment["CVENT_BROWSER_STARTED_AT"] = runtime["startedAt"]
+            bind_ego_runtime_environment(environment, runtime)
             environment["PATH"] = str(ROOT / "bin") + os.pathsep + environment.get("PATH", "")
             prompt = self.render_prompt(job, directory, runtime)
             self._write_pi_settings(directory)

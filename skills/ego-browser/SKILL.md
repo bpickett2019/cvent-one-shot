@@ -16,7 +16,7 @@ const targetId = process.env.CVENT_BROWSER_TARGET_ID
 if (!tabs.some(tab => (tab.targetId || tab.id) === targetId)) throw new Error('Job browser tab is unavailable')
 await browser.switchTab(targetId)
 const marker = await page.evaluate(() => window.name)
-if (marker !== `cvent-agent:${process.env.CVENT_BROWSER_RUNTIME_ID}:${process.env.CVENT_BROWSER_STARTED_AT}`) throw new Error('Job browser runtime marker mismatch')
+if (marker !== process.env.CVENT_BROWSER_RUNTIME_ID) throw new Error('Job browser runtime marker mismatch')
 console.log(await page.info())
 console.log(await page.snapshot())
 EOF

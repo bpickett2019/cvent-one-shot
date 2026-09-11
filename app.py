@@ -306,13 +306,13 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             "completed": [], "review_required": [], "activity_log": [], "agent_process_running": False,
             "browser": {"running": False, "worker_slot": worker_slot},
             "browser_gate": {"ownership": "AGENT", "desiredOwnership": "AGENT"},
-            "browser_strategy": "PI + EGO SKILL · JOB-ISOLATED STEEL.DEV", "automation_scope": scope_summary(),
+            "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME", "automation_scope": scope_summary(),
             "events": len(authorized_events()), "selected_worker": worker_slot or 1,
         }, headers={"Cache-Control": "no-store"})
     directory = directory_for(job)
     state = read_json(directory / "state.json", {})
     persisted = store.get_job(job["id"])
-    state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "PI + EGO SKILL · JOB-ISOLATED STEEL.DEV"})
+    state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
     if persisted and persisted["state"] in TERMINAL_STATES:
         state.update({"status": persisted["state"], "current_action": persisted.get("error") or state.get("current_action")})
         provider_failure = runner._provider_failure(directory)

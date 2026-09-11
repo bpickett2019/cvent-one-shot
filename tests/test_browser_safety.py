@@ -40,12 +40,11 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn("d.ownership==='USER'&&d.desiredOwnership==='USER'",APP)
         self.assertIn("if not user_owned:",APP)
         self.assertIn('ownership.get("ownership") == "USER"',APP)
-    def test_product_explains_the_direct_pi_ego_workflow(self):
+    def test_product_uses_cvent_agent_branding(self):
+        self.assertNotRegex(HTML,r'(?i)\bpi\b')
         self.assertIn('<title>Forge · CVENT Agent</title>',HTML)
-        self.assertIn('PI AGENT · EGO BROWSER · STEEL.DEV',HTML)
-        self.assertIn('Upload the RR. Pi builds the event.',HTML)
-        self.assertIn('Pi reads the workbook directly',HTML)
-        self.assertIn('PI + EGO SKILL · STEEL.DEV',HTML)
+        self.assertIn('Current CVENT Agent execution',HTML)
+        self.assertIn('<dt>CVENT Agent</dt>',HTML)
         self.assertIn('FastAPI(title="CVENT Agent"',APP)
         self.assertIn('state["agent_session_saved"]',APP)
         self.assertNotIn('state["agent_session"]',APP)
@@ -73,20 +72,21 @@ class ViewerSafetyTests(unittest.TestCase):
         self.assertIn('id="workbook-file-meta"',HTML)
         self.assertIn('renderWorkbookIdentity(state.rr_file',HTML)
         self.assertIn("['draft','cancelled'].includes(jobState)",HTML)
-        self.assertIn("jobState==='cancelled'?'RUN PI AGAIN':'RUN PI AGENT'",HTML)
+        self.assertIn("jobState==='cancelled'?'START AGAIN':'START BUILD'",HTML)
         self.assertIn("d.detail==='CSRF validation failed'",HTML)
         self.assertIn("fetch('/api/me',{cache:'no-store'})",HTML)
 
     def test_sidebar_navigation_is_clickable(self):
-        for target in ('workspace-top','intake-panel','browser-panel'):
+        for target in ('workspace-top','scope-panel','intake-panel','workbook-panel','browser-panel'):
             self.assertIn(f'data-target="{target}"',HTML)
             self.assertIn(f'id="{target}"',HTML)
-        self.assertNotIn('data-target="scope-panel"',HTML)
-        self.assertNotIn('data-target="workbook-panel"',HTML)
         self.assertIn('window.scrollTo({top,behavior})',HTML)
         self.assertIn("target.classList.add('nav-focus')",HTML)
-        self.assertIn('<strong>Steel.dev browser</strong><small>Watch Pi use Ego</small>',HTML)
+        self.assertLess(HTML.index('data-target="workbook-panel"'),HTML.index('data-target="browser-panel"'))
+        self.assertIn('<strong>CVENT browser</strong><small>Watch and take control</small>',HTML)
         self.assertIn("x.setAttribute('aria-current','page')",HTML)
+        self.assertIn('The uploaded RR drives configuration',HTML)
+        self.assertIn('scope-confirmed',HTML)
     def test_completed_work_is_visibly_reported(self):
         self.assertIn('id="completion-summary"',HTML)
         self.assertIn('id="completion-chips"',HTML)
@@ -330,7 +330,8 @@ class BrowserTargetSafetyTests(unittest.TestCase):
         self.assertIn('CVENT_BROWSER_TARGET_ID',runner)
         self.assertIn('page.snapshot()',SKILL)
         self.assertIn('page.getByRole',SKILL)
-        self.assertIn('CVENT_BROWSER_RUNTIME_ID',SKILL)
+        self.assertIn("marker !== process.env.CVENT_BROWSER_RUNTIME_ID",SKILL)
+        self.assertNotIn('CVENT_BROWSER_STARTED_AT',SKILL)
         self.assertIn('CVENT_LEASE_VALIDATE_URL',shim)
         self.assertIn('x-cvent-lease-token',shim)
         self.assertIn('vendor/ego-browser-linux/dist/src/index.js',shim)

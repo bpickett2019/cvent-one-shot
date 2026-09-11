@@ -7,7 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from control_store import ControlStore
-from job_runner import JobRunner, classify_process_outcome
+from job_runner import JobRunner, bind_ego_runtime_environment, classify_process_outcome
 from runtime_config import DEFAULT_EVENT_KEY, DEFAULT_EVENT_NAME
 
 
@@ -39,6 +39,18 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         tools = set(command[command.index("--tools") + 1].split(","))
         self.assertEqual(tools, {"read", "bash", "cvent_job_update", "cvent_login_handoff", "cvent_finish"})
         self.assertEqual(command[-1], "job prompt")
+
+    def test_ego_environment_uses_canonical_browser_runtime_keys(self):
+        environment = {}
+        bind_ego_runtime_environment(environment, {
+            "browserRuntimeId": "cvent-runtime-test",
+            "targetBrowserIdentity": {"targetId": "steel-target-test"},
+            "createdAt": "2026-09-11T00:00:00Z",
+        })
+        self.assertEqual(environment["CVENT_BROWSER_RUNTIME_ID"], "cvent-runtime-test")
+        self.assertEqual(environment["CVENT_BROWSER_TARGET_ID"], "steel-target-test")
+        with self.assertRaisesRegex(RuntimeError, "missing Ego target identity"):
+            bind_ego_runtime_environment({}, {"runtimeId": "wrong-schema", "startedAt": "wrong-schema"})
 
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
         first = self.runner.environment(self.job, "lease-token", 1)
