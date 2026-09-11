@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import subprocess
@@ -32,17 +31,13 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-4-6")
         self.assertNotIn("--api-key", command)
         self.assertNotIn("ANTHROPIC_API_KEY", " ".join(command))
-        self.assertIn("--no-builtin-tools", command)
+        self.assertNotIn("--no-builtin-tools", command)
         extension = command[command.index("--extension") + 1]
         self.assertTrue(extension.endswith("extensions/cvent-job-tools.ts"))
+        skill = command[command.index("--skill") + 1]
+        self.assertTrue(skill.endswith("skills/ego-browser/SKILL.md"))
         tools = set(command[command.index("--tools") + 1].split(","))
-        self.assertNotIn("read", tools)
-        self.assertNotIn("bash", tools)
-        self.assertEqual(tools, {
-            "cvent_prepare_rr", "cvent_expectations", "cvent_plan", "cvent_job_read",
-            "cvent_job_update", "cvent_record_domain", "cvent_verify_domain", "cvent_browser", "cvent_ego_actions", "cvent_section_state", "cvent_execute_section", "cvent_login_handoff",
-            "cvent_snapshot_chunk", "cvent_finish",
-        })
+        self.assertEqual(tools, {"read", "bash", "cvent_job_update", "cvent_login_handoff", "cvent_finish"})
         self.assertEqual(command[-1], "job prompt")
 
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
@@ -68,50 +63,17 @@ class JobRunnerConfigurationTests(unittest.TestCase):
         self.assertNotIn("CVENT_SESSION_SECRET", environment)
         self.assertNotIn("AZURE_CLIENT_SECRET", environment)
 
-    def test_deterministic_rr_preflight_environment_has_no_provider_or_app_secrets(self):
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "provider-key",
-            "CVENT_LEASE_TOKEN": "lease-token",
-            "ENTRA_CLIENT_SECRET": "entra-secret",
-            "CVENT_SESSION_SECRET": "session-secret",
-        }):
-            environment = self.runner.prepare_environment(self.job, 1)
-        self.assertEqual(environment["CVENT_JOB_ID"], self.job["id"])
-        self.assertEqual(environment["CVENT_WORKER_SLOT"], "1")
-        self.assertFalse(set(environment) & {
-            "ANTHROPIC_API_KEY", "CVENT_LEASE_TOKEN", "ENTRA_CLIENT_SECRET", "CVENT_SESSION_SECRET",
-        })
-
-    def test_deterministic_rr_preflight_runs_before_agent_with_matching_evidence(self):
-        workbook = self.directory / "input.xlsx"
-        workbook.write_bytes(b"test-workbook")
-        expected = {
-            "rr": {"sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(), "authority": "uploaded_rr"},
-            "target": {"eventId": self.job["event_id"], "eventKey": self.job["event_key"], "name": self.job["event_name"]},
-            "counts": {"applicableFields": 1},
-        }
-        commands = []
-
-        def run(command, **kwargs):
-            commands.append(command)
-            if command[1].endswith("rr_compiler.py"):
-                (self.directory / "expected-domains.json").write_text(json.dumps(expected))
-            if command[1].endswith("rr_validator.py"):
-                rr_hash = expected["rr"]["sha256"]
-                (self.directory / "rr-validation.json").write_text(json.dumps({"rrSha256": rr_hash, "counts": {"VERIFIED": 1}}))
-                (self.directory / "configuration-plan.json").write_text(json.dumps({"rrSha256": rr_hash, "target": expected["target"]}))
-            return subprocess.CompletedProcess(command, 0, "{}", "")
-
-        with patch("job_runner.job_dir", return_value=self.directory), \
-             patch.object(self.runner, "prepare_environment", return_value={"PATH": os.environ.get("PATH", "")}), \
-             patch.object(subprocess, "run", side_effect=run):
-            result = self.runner.prepare_rr(self.job, 1)
-        self.assertEqual(result, expected)
-        self.assertTrue(commands[0][1].endswith("inspect_rr.py"))
-        self.assertTrue(commands[1][1].endswith("rr_compiler.py"))
-        self.assertTrue(commands[2][1].endswith("rr_validator.py"))
-        performance = json.loads((self.directory / "preflight-performance.json").read_text())
-        self.assertEqual([item["stage"] for item in performance["stages"]], ["rr_load_inspection", "rr_extraction", "rr_validation_and_planning"])
+    def test_pi_reads_rr_directly_without_compiler_preflight(self):
+        self.assertFalse(hasattr(self.runner, "prepare_rr"))
+        source=(Path(__file__).resolve().parents[1]/"job_runner.py").read_text()
+        start=source.index("    def _launch(")
+        launch=source[start:source.index("\n    def ", start + 8)]
+        self.assertNotIn("rr_compiler.py",launch)
+        self.assertNotIn("rr_validator.py",launch)
+        self.assertNotIn("inspect_rr.py",launch)
+        prompt=(Path(__file__).resolve().parents[1]/"PI_PROMPT.md").read_text()
+        self.assertIn("inspect_rr.py",prompt)
+        self.assertIn("Interpret the workbook yourself",prompt)
 
     def test_provider_probe_runs_without_application_secrets_and_fails_closed(self):
         completed = subprocess.CompletedProcess(["python"], 1, '{"ok":false,"classification":"credit_unavailable"}\n', "")

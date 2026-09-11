@@ -306,13 +306,13 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             "completed": [], "review_required": [], "activity_log": [], "agent_process_running": False,
             "browser": {"running": False, "worker_slot": worker_slot},
             "browser_gate": {"ownership": "AGENT", "desiredOwnership": "AGENT"},
-            "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME", "automation_scope": scope_summary(),
+            "browser_strategy": "PI + EGO SKILL · JOB-ISOLATED STEEL.DEV", "automation_scope": scope_summary(),
             "events": len(authorized_events()), "selected_worker": worker_slot or 1,
         }, headers={"Cache-Control": "no-store"})
     directory = directory_for(job)
     state = read_json(directory / "state.json", {})
     persisted = store.get_job(job["id"])
-    state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "EGO DIRECT · JOB-ISOLATED STEEL RUNTIME"})
+    state.update({"job": safe_job(persisted), "run_mode": "mock", "browser_strategy": "PI + EGO SKILL · JOB-ISOLATED STEEL.DEV"})
     if persisted and persisted["state"] in TERMINAL_STATES:
         state.update({"status": persisted["state"], "current_action": persisted.get("error") or state.get("current_action")})
         provider_failure = runner._provider_failure(directory)
@@ -320,11 +320,12 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
             state["provider_failure"] = provider_failure
             if provider_failure.lower() not in str(state.get("current_action", "")).lower():
                 state["current_action"] = f"{provider_failure}; {state.get('current_action', 'agent stopped')}"
-    from completion_state import verified_completed_stages
-    state["completed"] = verified_completed_stages(state,
-        read_json(directory / "domain-results.json", {}),
-        read_json(directory / "final-verification.json", {}),
-        read_json(directory / "rr-validation.json", {}))
+    validation = read_json(directory / "rr-validation.json", {})
+    if validation.get("items"):
+        from completion_state import verified_completed_stages
+        state["completed"] = verified_completed_stages(state,
+            read_json(directory / "domain-results.json", {}),
+            read_json(directory / "final-verification.json", {}), validation)
     state["automation_scope"] = scope_summary()
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)

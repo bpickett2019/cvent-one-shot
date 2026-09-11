@@ -1,7 +1,6 @@
 """Immediate three-slot admission and isolated Pi/Steel lifecycle."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -191,6 +190,8 @@ class JobRunner:
             "CVENT_BROWSER_PROFILE_DIR": str(browser_profile_dir(job["workspace_id"], slot_id)),
             "CVENT_BROWSER_CACHE_DIR": str(browser_cache_dir(job["workspace_id"], slot_id)),
             "CVENT_STEEL_API_ORIGIN": slot.api_origin, "CVENT_CDP_ORIGIN": slot.cdp_origin,
+            "EGO_BROWSER_CDP_HOST": slot.cdp_origin.split("://", 1)[-1].split(":", 1)[0],
+            "EGO_BROWSER_CDP_PORT": slot.cdp_origin.rsplit(":", 1)[-1],
             "CVENT_VIEWER_URL": f"/api/jobs/{job['id']}/viewer",
             "CVENT_LEASE_VALIDATE_URL": os.environ.get("CVENT_LEASE_VALIDATE_URL", "http://127.0.0.1:8877/internal/leases/validate"),
             "CVENT_LEASE_TOKEN": token, "CVENT_AUTHORIZED_EVENT_ID": job["event_id"],
@@ -198,6 +199,7 @@ class JobRunner:
             "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
             "CVENT_PI_PROVIDER": pi_provider(), "CVENT_PI_MODEL": pi_model(),
             "CVENT_PYTHON": sys.executable,
+            "CVENT_BROWSER_TARGET_ID": "cvent-agent-browser-target",
             "PI_CODING_AGENT_DIR": str(directory / "pi-config"), "PI_CODING_AGENT_SESSION_DIR": str(directory / "pi-sessions"),
             "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0",
         })
@@ -211,24 +213,6 @@ class JobRunner:
             "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_FEDERATED_TOKEN_FILE",
         ):
             environment.pop(name, None)
-        return environment
-
-    def prepare_environment(self, job: dict[str, Any], slot_id: int) -> dict[str, str]:
-        """Give deterministic RR helpers only non-secret job identity and fixed paths."""
-        environment = {
-            name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TZ") if os.environ.get(name)
-        }
-        environment.update({
-            "CVENT_REPO_ROOT": str(ROOT),
-            "CVENT_JOB_DIR": str(job_dir(job["workspace_id"], job["id"])),
-            "CVENT_JOB_ID": job["id"],
-            "CVENT_WORKSPACE_ID": job["workspace_id"],
-            "CVENT_WORKER_SLOT": str(slot_id),
-            "CVENT_AUTHORIZED_EVENT_ID": job["event_id"],
-            "CVENT_AUTHORIZED_EVENT_NAME": job["event_name"],
-            "CVENT_AUTHORIZED_EVENT_KEY": job["event_key"],
-            "CVENT_AUTHORIZED_EVENT_CODE": event_by_id(job["event_id"]).event_code,
-        })
         return environment
 
     def verify_provider_access(self, directory: Path) -> dict[str, Any]:
@@ -256,50 +240,6 @@ class JobRunner:
         if completed.returncode or not result.get("ok"):
             raise RuntimeError(f"Anthropic preflight failed: {result.get('classification', 'unavailable')}")
         return result
-
-    def prepare_rr(self, job: dict[str, Any], slot_id: int) -> dict[str, Any]:
-        """Compile the current RR before any browser or model process can start."""
-        directory = job_dir(job["workspace_id"], job["id"])
-        workbook = directory / "input.xlsx"
-        inspection = directory / "input.inspection.json"
-        environment = self.prepare_environment(job, slot_id)
-        commands = (
-            ("rr_load_inspection", [sys.executable, str(ROOT / "inspect_rr.py"), str(workbook), str(inspection)]),
-            ("rr_extraction", [sys.executable, str(ROOT / "rr_compiler.py")]),
-            ("rr_validation_and_planning", [sys.executable, str(ROOT / "rr_validator.py")]),
-        )
-        completed = None
-        timings = []
-        preflight_started = time.monotonic()
-        for stage, command_line in commands:
-            started = time.monotonic()
-            completed = subprocess.run(
-                command_line, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=180,
-            )
-            timings.append({"stage": stage, "durationMs": round((time.monotonic() - started) * 1000, 1)})
-            if completed.returncode:
-                detail = (completed.stderr or completed.stdout).strip().splitlines()
-                raise RuntimeError("RR preflight failed: " + (detail[-1] if detail else "approved helper failed"))
-        expected = read_json(directory / "expected-domains.json", {})
-        validation = read_json(directory / "rr-validation.json", {})
-        plan = read_json(directory / "configuration-plan.json", {})
-        atomic_json(directory / "preflight-performance.json", {
-            "stages": timings, "totalMs": round((time.monotonic() - preflight_started) * 1000, 1),
-            "validationCounts": validation.get("counts", {}),
-        })
-        if (
-            not expected
-            or expected.get("rr", {}).get("sha256") != hashlib.sha256(workbook.read_bytes()).hexdigest()
-            or expected.get("rr", {}).get("authority") != "uploaded_rr"
-            or expected.get("target", {}).get("eventId") != job["event_id"]
-            or expected.get("target", {}).get("eventKey") != job["event_key"]
-            or expected.get("target", {}).get("name") != job["event_name"]
-            or validation.get("rrSha256") != expected.get("rr", {}).get("sha256")
-            or plan.get("rrSha256") != expected.get("rr", {}).get("sha256")
-            or plan.get("target", {}).get("eventId") != job["event_id"]
-        ):
-            raise RuntimeError("RR preflight produced stale or mismatched expectations")
-        return expected
 
     def steel_command(self, job: dict[str, Any], token: str, slot_id: int, command: str,
                       url: str | None = None, timeout: int = 180) -> dict[str, Any]:
@@ -360,7 +300,7 @@ class JobRunner:
         try:
             state = read_json(directory / "state.json", fresh_state(job))
             state.update({
-                "status": "starting", "current_stage": "starting", "current_action": "Compiling and verifying the current RR",
+                "status": "starting", "current_stage": "starting", "current_action": "Preparing Pi agent",
                 "worker_slot": active.slot_id, "started_at": state.get("started_at") or now(), "updated_at": now(),
             })
             atomic_json(directory / "state.json", state)
@@ -368,11 +308,7 @@ class JobRunner:
             atomic_json(directory / "state.json", state)
             provider = self.verify_provider_access(directory)
             append_log(directory, f"Anthropic one-token access probe passed in {provider.get('durationMs', 0)} ms")
-            state.update({"current_action": "Compiling and verifying the current RR", "updated_at": now()})
-            atomic_json(directory / "state.json", state)
-            expected = self.prepare_rr(job, active.slot_id)
-            append_log(directory, f"RR preflight compiled {expected.get('counts', {}).get('applicableFields', 0)} writable configuration fields")
-            state.update({"current_action": "Starting isolated Steel browser", "updated_at": now()})
+            state.update({"current_action": "Starting isolated Steel.dev browser", "updated_at": now()})
             atomic_json(directory / "state.json", state)
             append_log(directory, f"Acquired worker {active.slot_id} and event lease {job['event_id']}")
             steel = self.steel_command(job, active.token, active.slot_id, "ensure")
@@ -384,6 +320,10 @@ class JobRunner:
                 profile_path=browser_profile_dir(job["workspace_id"], active.slot_id),
             )
             BrowserGate(directory).initialize()
+            environment = self.pi_environment(job, active.token, active.slot_id)
+            environment["CVENT_BROWSER_RUNTIME_ID"] = runtime["runtimeId"]
+            environment["CVENT_BROWSER_STARTED_AT"] = runtime["startedAt"]
+            environment["PATH"] = str(ROOT / "bin") + os.pathsep + environment.get("PATH", "")
             prompt = self.render_prompt(job, directory, runtime)
             self._write_pi_settings(directory)
             sessions = directory / "pi-sessions"
@@ -391,7 +331,7 @@ class JobRunner:
             command_line = self.pi_command(job, directory, state, prompt)
             output = open(directory / "pi-output.log", "a", buffering=1)
             process = subprocess.Popen(
-                command_line, cwd=directory, env=self.pi_environment(job, active.token, active.slot_id),
+                command_line, cwd=directory, env=environment,
                 stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
             )
             active.process = process
@@ -543,18 +483,14 @@ class JobRunner:
 
     def pi_command(self, job: dict[str, Any], directory: Path, state: dict[str, Any], prompt: str) -> list[str]:
         sessions = directory / "pi-sessions"
-        capability_tools = (
-            "cvent_prepare_rr,cvent_expectations,cvent_plan,cvent_job_read,"
-            "cvent_job_update,cvent_record_domain,cvent_verify_domain,cvent_browser,cvent_ego_actions,cvent_section_state,cvent_execute_section,cvent_login_handoff,"
-            "cvent_snapshot_chunk,cvent_finish"
-        )
+        tools = "read,bash,cvent_job_update,cvent_login_handoff,cvent_finish"
         command_line = [
             "pi", "-p", "--approve", "--provider", pi_provider(), "--model", pi_model(),
             "--thinking", os.environ.get("CVENT_PI_THINKING", "high"),
             "--no-extensions", "--extension", str(ROOT / "extensions/cvent-job-tools.ts"),
-            "--no-skills", "--skill", str(ROOT / ".agents/skills/cvent-browser/SKILL.md"),
-            "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
-            "--tools", capability_tools,
+            "--no-skills", "--skill", str(ROOT / "skills/ego-browser/SKILL.md"),
+            "--no-prompt-templates", "--no-context-files",
+            "--tools", tools,
             "--session-dir", str(sessions), "--name", f"cvent-{job['id']}",
         ]
         if state.get("resume_requested") is True:
@@ -575,8 +511,6 @@ class JobRunner:
             "REPORT_PATH": str((directory / "final-report.json").resolve()),
             "AUTH_SETTINGS_PATH": str((directory / "auth-settings.json").resolve()),
             "BROWSER_RUNTIME_PATH": str((directory / "browser-runtime.json").resolve()),
-            "BROWSER_TOOL_PATH": str((ROOT / "browser_tool.py").resolve()),
-            "CAPABILITY_EXTENSION_PATH": str((ROOT / "extensions/cvent-job-tools.ts").resolve()),
             "JOB_DIR": str(directory.resolve()),
             "AUTHORIZED_EVENT_NAME": job["event_name"], "AUTHORIZED_EVENT_ID": job["event_id"],
             "AUTHORIZED_EVENT_KEY": job["event_key"],
@@ -642,7 +576,8 @@ class JobRunner:
     def _mutation_attempted(directory: Path) -> bool:
         audit = directory / "scope-write-audit.jsonl"
         uncertain = directory / "browser-mutation-uncertain.json"
-        return uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
+        direct_ego = directory / "direct-ego-invoked.json"
+        return direct_ego.exists() or uncertain.exists() or (audit.exists() and audit.stat().st_size > 0)
 
     @staticmethod
     def _is_pi_process(pid: int) -> bool:

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CVENT_REPO_ROOT:?CVENT_REPO_ROOT is required}"
+: "${CVENT_JOB_DIR:?CVENT_JOB_DIR is required}"
+: "${EGO_BROWSER_CDP_HOST:?EGO_BROWSER_CDP_HOST is required}"
+: "${EGO_BROWSER_CDP_PORT:?EGO_BROWSER_CDP_PORT is required}"
+
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+path = Path(os.environ["CVENT_JOB_DIR"]) / "browser-gate.json"
+gate = json.loads(path.read_text())
+if gate.get("ownership") != "AGENT" or gate.get("desiredOwnership") != "AGENT":
+    raise SystemExit("Ego paused: the user currently controls this Steel browser")
+endpoint = os.environ.get("CVENT_LEASE_VALIDATE_URL", "")
+token = os.environ.get("CVENT_LEASE_TOKEN", "")
+query = urlencode({"job_id": os.environ.get("CVENT_JOB_ID", ""), "event_id": os.environ.get("CVENT_AUTHORIZED_EVENT_ID", "")})
+if not endpoint or not token:
+    raise SystemExit("Ego blocked: canonical event lease credentials are unavailable")
+try:
+    response = urlopen(Request(endpoint + "?" + query, headers={"x-cvent-lease-token": token}), timeout=5)
+    status = response.status
+    response.close()
+except Exception as exc:
+    raise SystemExit(f"Ego blocked: canonical event lease validation failed ({type(exc).__name__})")
+if status != 204:
+    raise SystemExit("Ego blocked: canonical event lease is not current")
+(path.parent / "direct-ego-invoked.json").write_text(json.dumps({"mutationPossible": True}))
+PY
+
+exec node "$CVENT_REPO_ROOT/vendor/ego-browser-linux/dist/src/index.js" "$@"

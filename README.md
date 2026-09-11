@@ -39,49 +39,26 @@ must receive explicitly authorized existing events through the deployment's
 server-side allowlist; RR uploads never choose or authorize arbitrary Cvent
 targets.
 
-## Safety model
+## RR → Pi → Ego → Steel.dev
 
-The uploaded RR is the authority for normal event-scoped configuration. RR-driven
-configuration is writable by default and does not require per-field approval or
-scope IDs. Immediately before every write, `browser_tool.py` verifies:
+The runtime intentionally follows one direct path:
 
-1. the per-job BrowserActionGate is agent-owned;
-2. the canonical event lease exists, is unexpired, and belongs to this job/token;
-3. runtime, authorized-target, live-page event identity, and observed lifecycle match;
-4. the lifecycle label is explicitly allowed and the requested event-local controls are visibly editable;
-5. the target is not a protected publish, communication-send, attendee/contact,
-   delete/archive, event-identity, or account-global action.
+1. The operator selects an authorized existing Cvent event and uploads an `.xlsx` RR.
+2. The isolated Pi agent reads that workbook directly with the literal workbook reader.
+3. Pi loads the bundled `ego-browser` skill.
+4. The skill operates the job's existing Steel.dev Chromium profile and configures Cvent.
+5. Pi saves and reads values back in Cvent, then reports completion or specific unresolved items.
 
-Only Ego direct in the job's canonical Steel Chromium may automate Cvent. The
-viewer is display-only until explicit takeover. Related form edits can be grouped,
-but each saved configuration group must receive fresh readback before navigation
-or completion. Never publish/Go Live, send communications, delete/archive, access
-attendees/contacts, mutate another event, or mutate reusable/global definitions.
+There is no RR compiler, validator, generated execution contract, fixed field map,
+or application-owned section executor in the live path. Pi interprets workbook
+context and discovers the current Cvent controls through Ego.
 
-Pi runs with `--no-builtin-tools`: it has no shell, generic read/write, process,
-environment, or arbitrary-path access. The explicit
-`extensions/cvent-job-tools.ts` extension exposes only fixed job-scoped
-`cvent_*` capabilities. It invokes approved RR helpers and `browser_tool.py`
-without a shell, passes helper subprocesses an allowlisted environment, and
-never forwards Anthropic, Entra, or session secrets. Arbitrary JavaScript, raw
-CDP, and browser cookie/storage/network access are not exposed to the model. When Cvent requires
-SSO/MFA, the login-handoff capability keeps the same worker and browser alive,
-gives the viewer to the user, and blocks further automation until control is
-returned. The same persistent per-slot Chromium profile is reused across handoffs;
-no authentication material is copied into prompts or logs.
-
-Before Steel or Pi starts, a one-token Anthropic availability probe fails closed
-when the approved account cannot serve requests. During execution, each section
-uses a compact validated RR-derived mission. Ego dynamically inspects and operates
-the current Cvent UI through bounded semantic navigation, click, fill, select,
-check, Save, upload, and readback capabilities. Coherent editor actions can be
-batched in one model tool call; existing section procedures remain optional
-high-volume optimizations rather than write prerequisites. JavaScript and raw CDP
-remain unavailable to the model. Discount creation may use the fixed RR-derived
-bulk-import workbook. Provider failure after zero writes is
-`failed_prewrite`; after conclusively read-back writes it is
-`failed_recoverable` and resumes with fresh state/delta computation; only an
-unresolved mutation is `failed_uncertain` and blocks replay.
+The server still isolates each user/job/profile, reserves one worker and one
+canonical event lease, and binds the Steel target before Pi starts. The operator
+viewer is shielded while Pi owns the browser. Login handoff reuses the same
+persistent profile for SSO/MFA. The controlling prompt forbids event creation or
+renaming, publish/Go Live, communication sends, deletion/archive, attendee/contact
+access, and account-global mutations.
 
 ## Validation
 
