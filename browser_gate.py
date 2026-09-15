@@ -16,6 +16,7 @@ GATE = CURRENT / "browser-gate.json"
 LOCK = CURRENT / "browser-gate.lock"
 ACTORS = {"PI_EGO", "USER", "NONE"}
 _ACTION_LOCK_FD = ContextVar("browser_action_lock_fd", default=None)
+_MODEL_LOCK_PATH = ContextVar("model_control_lock_path", default=None)
 
 
 def child_lock_fds():
@@ -26,6 +27,24 @@ def child_lock_fds():
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+@contextmanager
+def model_control_lock(job_dir):
+    """Short dispatch/handoff sequencing lock; never held over network/browser work."""
+    path = (Path(job_dir) / "model-control.lock").resolve()
+    if _MODEL_LOCK_PATH.get() == path:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        token = _MODEL_LOCK_PATH.set(path)
+        try:
+            yield
+        finally:
+            _MODEL_LOCK_PATH.reset(token)
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 class BrowserGate:
@@ -50,11 +69,18 @@ class BrowserGate:
             }
 
     def write(self, data):
-        self.gate.parent.mkdir(parents=True, exist_ok=True)
-        data["updatedAt"] = now()
-        tmp = self.gate.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(self.gate)
+        with model_control_lock(self.job_dir):
+            self.gate.parent.mkdir(parents=True, exist_ok=True)
+            data["updatedAt"] = now()
+            if os.environ.get("CVENT_MODEL_BENCHMARK") == "1":
+                before = self.read() if self.gate.exists() else {}
+                keys = ("ownership", "desiredOwnership", "agentPaused", "authWaiting", "transition")
+                if any(before.get(k) != data.get(k) for k in keys):
+                    with (self.job_dir / "model-control-events.jsonl").open("a") as events:
+                        events.write(json.dumps({"at": data["updatedAt"], **{k: data.get(k) for k in keys}}) + "\n")
+            tmp = self.gate.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.replace(self.gate)
 
     def initialize(self):
         data = {
@@ -65,17 +91,18 @@ class BrowserGate:
         self.lock.touch()
         return data
 
+    def update(self, changes):
+        with model_control_lock(self.job_dir):
+            data = self.read()
+            data.update(changes)
+            self.write(data)
+            return data
+
     def request_user(self):
-        data = self.read()
-        data.update({"desiredOwnership": "USER", "transition": "WAITING_FOR_SAFE_BOUNDARY"})
-        self.write(data)
-        return data
+        return self.update({"desiredOwnership": "USER", "transition": "WAITING_FOR_SAFE_BOUNDARY"})
 
     def shield_agent(self):
-        data = self.read()
-        data.update({"desiredOwnership": "AGENT", "transition": "VERIFYING_AFTER_USER"})
-        self.write(data)
-        return data
+        return self.update({"desiredOwnership": "AGENT", "transition": "VERIFYING_AFTER_USER"})
 
     @contextmanager
     def lock_file(self, timeout=None):
@@ -100,35 +127,32 @@ class BrowserGate:
         if actor not in ACTORS or actor in ("USER", "NONE"):
             raise RuntimeError("Invalid automation actor")
         with self.lock_file(timeout=2) as fd:
-            data = self.read()
-            if data.get("ownership") != "AGENT" or data.get("desiredOwnership") != "AGENT":
-                raise RuntimeError("Browser is not agent-owned; action paused")
-            if data.get("activeActor") not in (None, "NONE"):
-                if data.get("lockProtocol") != "inherited-flock-v1":
-                    raise RuntimeError("Browser action gate is occupied; legacy helper requires operator review")
-                # Acquiring this kernel lock proves the old helper AND every
-                # dispatched child released their inherited descriptor. A PID
-                # check alone would not prove that no mutation remains in flight.
-                if data.get("mutationPossible"):
-                    marker = self.job_dir / "browser-mutation-uncertain.json"
-                    if not marker.exists():
-                        temporary = marker.with_suffix(".tmp")
-                        temporary.write_text(json.dumps({"at": now(), "error": "Mutating helper terminated before gate cleanup; readback required", "browserRuntimeId": data.get("browserRuntimeId")}))
-                        temporary.chmod(0o600)
-                        temporary.replace(marker)
-                data["abandonedActionRecoveredAt"] = now()
-            data.update({"activeActor": actor, "automationOwner": actor, "browserRuntimeId": runtime_id,
-                         "activePid": os.getpid(), "lockProtocol": "inherited-flock-v1",
-                         "mutationPossible": bool(mutation_possible)})
-            self.write(data)
+            with model_control_lock(self.job_dir):
+                data = self.read()
+                if data.get("ownership") != "AGENT" or data.get("desiredOwnership") != "AGENT":
+                    raise RuntimeError("Browser is not agent-owned; action paused")
+                if data.get("activeActor") not in (None, "NONE"):
+                    if data.get("lockProtocol") != "inherited-flock-v1":
+                        raise RuntimeError("Browser action gate is occupied; legacy helper requires operator review")
+                    # The inherited kernel lock proves old helpers/children ended.
+                    if data.get("mutationPossible"):
+                        marker = self.job_dir / "browser-mutation-uncertain.json"
+                        if not marker.exists():
+                            temporary = marker.with_suffix(".tmp")
+                            temporary.write_text(json.dumps({"at": now(), "error": "Mutating helper terminated before gate cleanup; readback required", "browserRuntimeId": data.get("browserRuntimeId")}))
+                            temporary.chmod(0o600)
+                            temporary.replace(marker)
+                    data["abandonedActionRecoveredAt"] = now()
+                data.update({"activeActor": actor, "automationOwner": actor, "browserRuntimeId": runtime_id,
+                             "activePid": os.getpid(), "lockProtocol": "inherited-flock-v1",
+                             "mutationPossible": bool(mutation_possible)})
+                self.write(data)
             token = _ACTION_LOCK_FD.set(fd)
             try:
                 yield fd
             finally:
                 _ACTION_LOCK_FD.reset(token)
-                data = self.read()
-                data.update({"activeActor": "NONE", "automationOwner": "PI_EGO", "activePid": None, "mutationPossible": False})
-                self.write(data)
+                self.update({"activeActor": "NONE", "automationOwner": "PI_EGO", "activePid": None, "mutationPossible": False})
 
 
 def _default() -> BrowserGate:

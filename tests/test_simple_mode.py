@@ -42,7 +42,7 @@ export async function evaluateLocator(target,fn){const d=descriptor(target);if(S
 export async function fill(target,text){state.value=text;if(!state.editor)state.persisted=text;store();if(text==='hiccup')throw Error('Recoverable field dispatch hiccup')}
 export async function focus(target){state.focused=target;store()}
 export async function insertText(text){return fill(state.focused||'@field',text)}
-export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
+export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;if(state.recordKey)state.records[state.recordKey]=state.value;state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
 export async function press(){}
 export async function down(){}
 export async function up(){}
@@ -51,7 +51,7 @@ export async function screenshot(){return 'browser-visual-test.png'}
 export async function waitForTimeout(){}
 export async function waitForLoadState(){}
 export async function waitForSelector(target){descriptor(target)}
-export async function goto(url){state.url=url;store()}
+export async function goto(url){state.url=url;const key=new URL(url).searchParams.get('recordId');if(key){state.recordKey=key;state.value=state.records[key]??'';state.persisted=state.value;state.editor=true}store()}
 export async function hover(){}
 export async function wheel(){}
 export async function selectOption(target,option){state.value=option;store()}
@@ -122,6 +122,58 @@ export async function setInputFiles(target,files){state.files=files;store()}
         self.assertIn('opens in assigned Page p1',r['error'])
         self.assertEqual(r['writesAttempted'],0)
         self.assertEqual(r['completedActions'],[])
+
+    def test_real_excel_drives_125_dynamic_edits_save_reopen_and_idempotent_recheck(self):
+        # Generic mocked forms, not a pricing/question executor or a model run.
+        # Script chooses work from literal Excel data and observed navigation.
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Unrecognized customer layout'
+        ws.append(['Object', 'Requested value'])
+        desired = {f'Object {i}': f'Value {i}' for i in range(125)}
+        for name, value in desired.items():
+            ws.append([name, value])
+        workbook = self.folder/'input.xlsx'
+        wb.save(workbook)
+        wb.close()
+        inspection = subprocess.run(['python3',str(regressions.ROOT/'inspect_rr.py'),str(workbook),str(self.folder/'input.inspection.json')],capture_output=True,text=True,timeout=30)
+        self.assertEqual(inspection.returncode,0,inspection.stderr)
+        for name in ('expected-domains.json','rr-validation.json','configuration-plan.json'):
+            (self.folder/name).unlink(missing_ok=True)
+        state = json.loads(self.state.read_text())
+        state.update(records={},links=[{'text':name,'href':f'https://app.cvent.com/edit?evtstub=test-event&recordId={i}'} for i,name in enumerate(desired)])
+        self.state.write_text(json.dumps(state))
+        script = r'''
+const links=JSON.parse(await page.snapshot()).links;
+let changed=0,verified=0;
+for(const row of rr.sheets[0].populated_rows.slice(1)) {
+  const [name,value]=row.map(cell=>cell.value);
+  const link=links.find(link=>link.text===name);
+  if(!link) throw Error('Missing observed object: '+name);
+  await page.goto(link.href);
+  if(await page.locator('@field').inputValue()!==value) {
+    await page.fill('@field',value);
+    await page.click('@save');
+    await page.goto(link.href);
+    changed++;
+  }
+  if(await page.locator('@field').inputValue()!==value) throw Error('Persisted mismatch: '+name);
+  verified++;
+}
+console.log(JSON.stringify({changed,verified}));
+'''
+        _, first = self.run_simple(script)
+        self.assertTrue(first['ok'],first)
+        self.assertEqual(json.loads(first['logs'][-1]),{'changed':125,'verified':125})
+        self.assertEqual(first['saves'],125)
+        self.assertGreaterEqual(first['readbacks'],125)
+        self.assertEqual(list(json.loads(self.state.read_text())['records'].values()),list(desired.values()))
+        _, recheck = self.run_simple(script)
+        self.assertTrue(recheck['ok'],recheck)
+        self.assertEqual(json.loads(recheck['logs'][-1]),{'changed':0,'verified':125})
+        self.assertEqual(recheck['saves'],0)
+        self.assertEqual(recheck['writesAttempted'],0)
 
     def test_original_rr_available_without_any_compiler_artifact(self):
         _, r=self.run_simple("console.log(rr.sheets[0].populated_rows[0][0]); console.log(desired);")

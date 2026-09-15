@@ -192,7 +192,7 @@ class ControlStore:
                 rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [dict(row) for row in rows]
 
-    def reserve_now(self, job_id: str, actor: str) -> dict[str, Any]:
+    def reserve_now(self, job_id: str, actor: str, *, serialized: bool = False) -> dict[str, Any]:
         """Immediately acquire a worker and event lease or reject without waiting.
 
         A rejected job stays in its safely restartable prior state. Event
@@ -209,6 +209,8 @@ class ControlStore:
             startable = {"draft", "login_required", "review_required", "failed", "failed_prewrite", "failed_recoverable", "cancelled"}
             if not job or job["state"] not in startable:
                 result = {"error": "Job cannot be started from its current state"}
+            elif serialized and conn.execute("SELECT 1 FROM worker_leases").fetchone():
+                result = {"error": "Serialized benchmark already has an active worker; no additional job was started"}
             elif conn.execute("SELECT 1 FROM event_leases WHERE event_id=?", (job["event_id"],)).fetchone():
                 result = {"error": "Event is busy; another job holds the canonical event lease"}
                 self._audit(conn, actor, "job.start_rejected", job_id, {"reason": "event_busy"})

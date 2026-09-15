@@ -5,6 +5,7 @@ import argparse,json,os,re,subprocess,sys,time,urllib.error,urllib.parse,urllib.
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
+from uuid import uuid4
 from browser_gate import action, child_lock_fds
 from browser_runtime import command as browser_command, load, local_probe, pages as browser_pages, select_page
 from runtime_config import browser_auth_metadata_path, browser_profile_dir
@@ -390,10 +391,16 @@ def run_direct(runtime_path,runtime,tool,operation,params):
             if attempted:mark_mutation_uncertain(operation,params,current,result.get('error','browser helper failed after write attempt'))
         else:audit_scope_write(operation,params,current,'succeeded')
     if proc.returncode or not result.get('ok'):
+        # Stable operation/surface scope for the paid-request circuit breaker.
+        # This is existing private browser evidence, not a new execution ledger.
+        result['failureOperation']=operation
+        result['failureSurface']=current.get('url','')
         atomic_private_json(CURRENT/'last-browser-failure-result.json',result)
+        evidence_name=f'ego-result-{uuid4()}.json'
+        atomic_private_json(CURRENT/evidence_name,result)
         detail=result.get('error','browser tool failed')
         if operation in ('actions','script'):
-            artifact="read last-browser-failure-result.json" if runtime.get('executionMode')=='simple' else "cvent_job_read artifact browser_failure"
+            artifact=f"read {evidence_name} (latest alias: last-browser-failure-result.json)" if runtime.get('executionMode')=='simple' else "cvent_job_read artifact browser_failure"
             detail+=f"; dispatched writes={result.get('writesAttempted','UNKNOWN')}, completed actions={len(result.get('completedActions',[]))}. Partial evidence: {artifact}; inspect and recover before replaying a possibly persisted action."
         raise RuntimeError(detail)
     return result

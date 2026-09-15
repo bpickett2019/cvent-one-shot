@@ -9,6 +9,9 @@ import urllib.request
 
 
 def main():
+    if os.environ.get("CVENT_MODEL_BENCHMARK") == "1":
+        print(json.dumps({"ok": False, "classification": "benchmark_inference_probe_disabled"}))
+        raise SystemExit(2)
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         print(json.dumps({"ok": False, "classification": "missing_key"}))

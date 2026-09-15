@@ -20,6 +20,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from auth import EntraAuth, Identity, restricted_staging_access
 from browser_gate import BrowserGate
+from benchmark_cost import BenchmarkDenied, enabled as benchmark_enabled
+from benchmark_meter import meter as benchmark_meter
 from browser_runtime import command as browser_command, load as load_browser_runtime, local_probe, pages as browser_pages, select_page
 from control_store import ACTIVE_STATES, TERMINAL_STATES, ControlStore
 from job_runner import JobRunner, UploadTooLarge, atomic_json, now, read_json
@@ -234,6 +236,102 @@ def validate_internal_lease(request: Request, job_id: str, event_id: str):
     return Response(status_code=204)
 
 
+@app.post("/internal/model-benchmark", include_in_schema=False)
+def model_benchmark_request(request: Request, payload: dict):
+    if not benchmark_enabled() or runner.benchmark is None:
+        raise HTTPException(409, "Benchmark guard is not enabled")
+    if not request.client or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(403, "Internal endpoint")
+    job = store.get_job(str(payload.get("jobId", "")))
+    active = runner.active(job["id"]) if job else None
+    supplied = request.headers.get("x-cvent-model-token", "")
+    if not active or not active.model_token or not secrets.compare_digest(supplied, active.model_token):
+        raise HTTPException(403, "Job-scoped model capability required")
+    if payload.get("executionId") != active.execution_id:
+        raise HTTPException(409, "Execution binding mismatch")
+    directory = directory_for(job)
+    operation = payload.get("operation")
+    data = payload.get("data", {})
+    try:
+        costs = runner.benchmark
+        result = None
+        if operation == "register":
+            revision = read_json(directory / "state.json", {}).get("deployed_sha", "unknown")
+            result = costs.register_execution(job["id"], active.execution_id, data["sessionId"], revision)
+        elif operation == "reserve":
+            costs.reserve(job, active.token, directory, active.execution_id, data)
+        elif operation == "dispatch":
+            costs.begin_dispatch(job, active.token, directory, active.execution_id, data["id"])
+        elif operation == "settle":
+            costs.settle(active.execution_id, data["id"], data)
+        elif operation in {"uncertain", "cancel"}:
+            costs.terminal(active.execution_id, data["id"], "UNKNOWN" if operation == "uncertain" else "CANCELLED")
+        elif operation == "failure":
+            result = costs.failure(job["id"], data["operation"], data.get("surface", ""), str(data["message"])[:32768])
+        elif operation == "handoff":
+            if not store.valid_event_lease(job["id"], active.token, job["event_id"]):
+                raise BenchmarkDenied("LEASE_LOST")
+            gate = BrowserGate(directory)
+            gate.request_user()  # Immediately pauses admission before safe-boundary wait.
+            with gate.lock_file(timeout=2):
+                value = gate.read()
+                value.update({"ownership": "USER", "desiredOwnership": "USER", "activeActor": "USER",
+                              "automationOwner": "USER", "agentPaused": True, "authWaiting": True,
+                              "pausedPids": [active.process.pid] if active.process else [], "transition": None})
+                gate.write(value)
+        elif operation == "denied":
+            code = str(data.get("code", "MODEL_ADMISSION_STOP"))
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,100}", code):
+                code = "MODEL_ADMISSION_STOP"
+            if active.process:
+                atomic_json(directory / f"model-admission-stop-{active.process.pid}.json", {"reason": code, "at": now()})
+        else:
+            raise ValueError("Unsupported benchmark operation")
+        if operation in {"settle", "uncertain", "cancel", "failure", "denied"}:
+            atomic_json(directory / "benchmark-cost.json", costs.snapshot(job["id"]))
+        return {"ok": True, "result": result}
+    except BenchmarkDenied as exc:
+        return JSONResponse({"ok": False, "code": exc.code, "definitelyNotDispatched": operation == "dispatch"}, status_code=409)
+    except (KeyError, ValueError, TypeError):
+        return JSONResponse({"ok": False, "code": "INVALID_BENCHMARK_METADATA", "definitelyNotDispatched": operation == "dispatch"}, status_code=400)
+
+
+@app.get("/api/jobs/{job_id}/model-cost")
+def model_cost_status(request: Request, job_id: str):
+    job = authorize_job(current_user(request), job_id)
+    if runner.benchmark is None:
+        raise HTTPException(409, "Benchmark guard is not enabled")
+    return runner.benchmark.snapshot(job["id"])
+
+
+@app.get("/api/jobs/{job_id}/model-meter")
+def model_meter_status(request: Request, job_id: str):
+    job = authorize_job(current_user(request), job_id)
+    if runner.benchmark is None:
+        raise HTTPException(409, "Benchmark guard is not enabled")
+    try:
+        cost = runner.benchmark.snapshot(job["id"])
+    except BenchmarkDenied as exc:
+        raise HTTPException(409, exc.code) from exc
+    return JSONResponse(benchmark_meter(cost, job, directory_for, store), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/jobs/{job_id}/model-allowance")
+def model_allowance(request: Request, job_id: str, payload: dict):
+    identity = current_user(request, mutate=True)
+    job = authorize_job(identity, job_id)
+    if not identity["is_admin"]:
+        raise HTTPException(403, "Operator approval required")
+    if runner.benchmark is None:
+        raise HTTPException(409, "Benchmark guard is not enabled")
+    try:
+        return runner.benchmark.approve(job["id"], actor=identity["subject"], is_admin=True,
+            allowance_micro=payload.get("allowance_micro"), resolve_blockers=payload.get("resolve_blockers") is True,
+            reason=payload.get("reason"))
+    except (ValueError, BenchmarkDenied) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     try:
@@ -339,6 +437,15 @@ def status(request: Request, job_id: str | None = None, worker_slot: int | None 
     state["activity_log"] = (directory / "activity.log").read_text(errors="replace").splitlines()[-200:] if (directory / "activity.log").exists() else []
     state["final_report"] = read_json(directory / "final-report.json", None)
     state["browser_gate"] = BrowserGate(browser_directory_for(job)).read()
+    if runner.benchmark is not None:
+        try:
+            cost = runner.benchmark.snapshot(job["id"])
+            state["model_meter"] = benchmark_meter(cost, job, directory_for, store)
+            state["model_cost"] = {key: cost[key] for key in (
+                "logical_build_id", "accounting_basis", "allowance_micro", "cumulative_cost_micro",
+                "unresolved_exposure_upper_micro", "warnings", "pause_code", "accounting_complete")}
+        except BenchmarkDenied:
+            state["model_cost"] = {"accounting_complete": False, "pause_code": "UNBOUND_BUILD"}
     active = active_job(job)
     if getattr(active, "read_only", False):
         state["current_action"] = "Read-only uncertainty reconciliation/capability inspection; no configuration writes are enabled"
@@ -720,7 +827,7 @@ def return_to_agent(request: Request, job_id: str | None = None):
             value = gate.read()
             value.update({
                 "ownership": "AGENT", "desiredOwnership": "AGENT", "activeActor": "NONE",
-                "automationOwner": "PI_EGO", "agentPaused": False, "pausedPids": [], "transition": None,
+                "automationOwner": "PI_EGO", "agentPaused": False, "pausedPids": [], "transition": None, "authWaiting": False,
             })
             gate.write(value)
             os.killpg(active.process.pid, signal.SIGCONT)

@@ -8,6 +8,7 @@ import { retainJobContext, ValidatedRRCache, BrowserRecoveryBudget, firstIncompl
 import { isDataAction, validateAtomicSteps, planNativeRound } from "../ego_round_validation.mjs";
 
 const SIMPLE = process.env.CVENT_EXECUTION_MODE === "simple";
+const BENCHMARK = process.env.CVENT_MODEL_BENCHMARK === "1";
 const rrCache = new ValidatedRRCache();
 const recoveryBudget = new BrowserRecoveryBudget();
 let preparedRR: any = null;
@@ -57,6 +58,47 @@ const ALLOWED_TOOLS = new Set(SIMPLE ? ["read", "bash", "cvent_open_event", "cve
   "cvent_login_handoff", "cvent_snapshot_chunk", "cvent_finish",
 ]);
 const MAX_TEXT_BYTES = 48 * 1024;
+const SIMPLE_PREVIEW_BYTES = 12 * 1024;
+
+// Application circuit breaker, not an invoice cap. Checked between tool batches;
+// never kill an in-flight Save or erase pending readback/uncertainty evidence.
+export class UsageBudget {
+  totals: Record<string, number>;
+  repeatedError = "";
+  repeatedErrorCount = 0;
+  limits: { calls: number; tokens: number; apiUsd: number };
+  constructor(saved: Record<string, number> = {}, env = process.env) {
+    const positive = (name: string, fallback: number) => {
+      const n = Number(env[name] ?? fallback);
+      if (!Number.isFinite(n) || n <= 0) throw new Error(`${name} must be a positive finite number`);
+      return n;
+    };
+    this.limits = { calls: positive("CVENT_MAX_MODEL_CALLS", 250), tokens: positive("CVENT_MAX_TOTAL_TOKENS", 20000000), apiUsd: positive("CVENT_MAX_API_COST_USD", 15) };
+    this.totals = Object.fromEntries(["calls", "input", "output", "cacheRead", "cacheWrite", "totalTokens", "estimatedApiUsd", "estimatedSubscriptionEquivalentUsd"].map(k => [k, Number(saved[k]) || 0]));
+  }
+  record(message: any) {
+    const usage = message.usage ?? {};
+    const n = (value: any) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+    this.totals.calls++;
+    for (const key of ["input", "output", "cacheRead", "cacheWrite"]) this.totals[key] += n(usage[key]);
+    this.totals.totalTokens += n(usage.totalTokens) || ["input", "output", "cacheRead", "cacheWrite"].reduce((sum, key) => sum + n(usage[key]), 0);
+    const bucket = message.provider === "openai-codex" ? "estimatedSubscriptionEquivalentUsd" : "estimatedApiUsd";
+    this.totals[bucket] += n(usage.cost?.total);
+  }
+  toolResult(name: string, result: any, isError: boolean) {
+    if (!isError) { this.repeatedError = ""; this.repeatedErrorCount = 0; return; }
+    const key = createHash("sha256").update(name + JSON.stringify(result?.content ?? result)).digest("hex");
+    this.repeatedErrorCount = key === this.repeatedError ? this.repeatedErrorCount + 1 : 1;
+    this.repeatedError = key;
+  }
+  reason(): string | null {
+    if (this.repeatedErrorCount >= 3) return "Three identical consecutive tool failures; operator review required before more model calls";
+    if (this.totals.calls >= this.limits.calls) return `Model-call checkpoint reached (${this.limits.calls})`;
+    if (this.totals.totalTokens >= this.limits.tokens) return `Cumulative token checkpoint reached (${this.limits.tokens}, including cached tokens)`;
+    if (this.totals.estimatedApiUsd >= this.limits.apiUsd) return `Estimated API spend checkpoint reached ($${this.limits.apiUsd}; not an invoice total)`;
+    return null;
+  }
+}
 const SNAPSHOT_CHUNK_BYTES = 36 * 1024;
 const MAX_CHILD_OUTPUT = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
@@ -89,6 +131,21 @@ const jobDir = resolve(requiredEnvironment("CVENT_JOB_DIR"));
 const repoRoot = resolve(requiredEnvironment("CVENT_REPO_ROOT"));
 const runtimePath = join(jobDir, "browser-runtime.json");
 const python = process.env.CVENT_PYTHON || "python3";
+
+async function benchmarkCall(operation: string, data: Record<string, unknown>) {
+  try {
+    const { createBenchmarkClient } = await import(join(repoRoot, "scripts/benchmark_client.mjs"));
+    return await createBenchmarkClient().call(operation, data);
+  } catch (error) {
+    // Pi notification-hook exceptions are fail-open. Persist a stop which the
+    // guarded runtime checks BEFORE any provider/compaction request instead.
+    (globalThis as any)[Symbol.for("cvent.benchmark.stop")] = "BENCHMARK_CONTROL_UNAVAILABLE";
+    await atomicJson(join(jobDir, `model-admission-stop-${process.pid}.json`), {
+      reason: "BENCHMARK_CONTROL_UNAVAILABLE", at: new Date().toISOString(),
+    });
+    throw error;
+  }
+}
 
 function assertFixedJobPath(path: string): string {
   const absolute = resolve(path);
@@ -168,12 +225,24 @@ function runFixed(executable: string, args: string[], kind: "browser" | "prepare
       windowsHide: true,
     }, async (error, stdout, stderr) => {
       if (error) {
-        const message = redact(`${error.message}\n${stderr || stdout}`);
+        let structuredError = "";
+        if (kind === "browser") {
+          try {
+            const line = String(stdout).split(/\r?\n/).reverse().find(value => value.startsWith("BROWSER_ROUTER_RESULT="));
+            if (line) structuredError = String(JSON.parse(line.slice("BROWSER_ROUTER_RESULT=".length)).error ?? "");
+          } catch { /* Preserve the original helper diagnostic if malformed. */ }
+        }
+        const message = redact(structuredError || `${error.message}\n${stderr || stdout}`);
         if (kind === "browser") {
           const operation = args[args.indexOf("--operation") + 1] || "unknown";
           if (!SIMPLE) recoveryBudget.failure(operation, message);
           try {
-            await appendPerformance("browser_operation_failed", started, { operation, error: message, pid: process.pid });
+            const partial = message.includes("last-browser-failure-result.json")
+              ? await readJson(join(jobDir, "last-browser-failure-result.json"), {}) : {};
+            await appendPerformance("browser_operation_failed", started, { operation, error: message, pid: process.pid,
+              egoExecutionRound: ["script", "actions"].includes(operation),
+              actionCount: partial.completedActions?.length ?? 0, actionCountUnknown: !partial.completedActions,
+              writesAttempted: partial.writesAttempted ?? null });
             await appendActivity(`Browser operation ${operation} failed: ${message.slice(-900)}`);
             if (recoveryBudget.firstFailure) await atomicJson(join(jobDir, `first-browser-failure-${process.pid}.json`), recoveryBudget.firstFailure);
             if (recoveryBudget.terminalFailure) await atomicJson(join(jobDir, `controller-failure-${process.pid}.json`), recoveryBudget.terminalFailure);
@@ -891,6 +960,7 @@ const egoActionSchema = Type.Object({ operation: literalUnion(EGO_ACTION_OPERATI
 export default function cventJobTools(pi: any) {
   let turnStarted = 0;
   let firstTokenRecorded = false;
+  let usageBudget = new UsageBudget();
   let currentSection = "";
   const sectionTurns = new Map<string, number>();
   const deliveredPlanReads = new Set<string>();
@@ -909,6 +979,7 @@ export default function cventJobTools(pi: any) {
     `${String(args?.section ?? "")}:${Number(args?.offset ?? 0)}:${Number(args?.limit ?? 0)}`;
   pi.on("session_start", async () => {
     pi.setActiveTools([...ALLOWED_TOOLS]);
+    usageBudget = new UsageBudget((await readJson(join(jobDir, "token-usage.json"), {})).totals ?? {});
     await safeMetric("pi_session_start", performance.now(), { pid: process.pid });
   });
   pi.on("context", async (event: any) => {
@@ -934,6 +1005,10 @@ export default function cventJobTools(pi: any) {
   pi.on("message_end", async (event: any) => {
     if (event.message?.role !== "assistant") return;
     const usage = event.message.usage ?? {};
+    usageBudget.record(event.message);
+    await atomicJson(join(jobDir, "token-usage.json"), { totals: usageBudget.totals, limits: usageBudget.limits,
+      provider: event.message.provider, model: event.message.model, updatedAt: new Date().toISOString(),
+      costBasis: "SDK estimates, not billing; subscription equivalent is not an API charge" });
     const calls = (event.message.content ?? []).filter((item: any) => item.type === "toolCall");
     for (const call of calls) {
       const section = sectionFrom(String(call.name), call.arguments);
@@ -960,7 +1035,31 @@ export default function cventJobTools(pi: any) {
       if (deliveredPlanReads.has(key)) activeTurnProgress.repeatedRead = true;
     }
   });
+  pi.on("tool_result", async (event: any) => {
+    if (!BENCHMARK || !event.isError) return;
+    try {
+      const runtime = await readJson(runtimePath, {});
+      const message = (event.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+      const lastFailure = event.toolName === "bash" && message.includes("last-browser-failure-result.json")
+        ? await readJson(join(jobDir, "last-browser-failure-result.json"), {}) : {};
+      const operation = event.toolName === "bash" ? "browser_script" : String(event.toolName);
+      const surface = lastFailure.failureSurface ?? runtime.targetBrowserIdentity?.url ?? "unknown";
+      const episode = await benchmarkCall("failure", { operation, surface, message });
+      if (episode.paused) {
+        (globalThis as any)[Symbol.for("cvent.benchmark.stop")] = "BLOCKER_" + episode.blocker;
+        await atomicJson(join(jobDir, `model-admission-stop-${process.pid}.json`), {
+          reason: "BLOCKER_" + episode.blocker, at: new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      (globalThis as any)[Symbol.for("cvent.benchmark.stop")] = "BENCHMARK_CONTROL_UNAVAILABLE";
+      throw error;
+    }
+    // Successful reads never clear an unresolved episode. Operator review can
+    // resolve the scoped blocker; it cannot waive existing mutation uncertainty.
+  });
   pi.on("tool_execution_end", (event: any) => {
+    usageBudget.toolResult(String(event.toolName), event.result, !!event.isError);
     if (!activeTurnProgress || event.isError) return;
     const call = activeTurnProgress.toolCalls.get(String(event.toolCallId));
     const name = String(call?.name ?? event.toolName ?? "");
@@ -1004,6 +1103,11 @@ export default function cventJobTools(pi: any) {
     if (missing.length) throw new Error(`PI_CAPABILITY_MISMATCH: ${missing.join(", ")}`);
   });
   pi.on("tool_call", async (event: any) => {
+    const budgetReason = !BENCHMARK && process.env.CVENT_USAGE_GUARD_ENABLED === "1" ? usageBudget.reason() : null;
+    if (budgetReason) {
+      await atomicJson(join(jobDir, `usage-budget-stop-${process.pid}.json`), { reason: budgetReason, totals: usageBudget.totals, at: new Date().toISOString() });
+      return { block: true, terminate: true, reason: `${budgetReason}. Run is incomplete, not verified. Preserve all pending work and mutation evidence; do not auto-retry.` };
+    }
     if (!ALLOWED_TOOLS.has(event.toolName)) {
       return { block: true, reason: "Capability denied: this production agent has no shell or general filesystem tools" };
     }
@@ -1045,20 +1149,27 @@ export default function cventJobTools(pi: any) {
     name: "read", label: "Read verified job input or Ego skill",
     description: "Read the Ego skill or this job's verified RR plan/evidence. Supports offset/limit, not secrets or other jobs.",
     promptSnippet: "Read Ego skill and verified job files",
-    parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })) }),
+    parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })), chunk: Type.Optional(Type.Integer({ minimum: 1 })) }),
     async execute(_id: string, params: any) {
       const target = resolve(jobDir, params.path);
       const skill = join(repoRoot, "skills/ego-browser/SKILL.md");
       const allowed = ["configuration-plan.json", "rr-validation.json", "expected-domains.json", "input.inspection.json", "input.inspection-summary.json", "job-prompt.md", "state.json", "activity.log", "scope-write-audit.jsonl", "last-browser-failure-result.json", "browser-last-script-result.json", "final-report.json"];
       const skillReference = SIMPLE && target.startsWith(join(repoRoot, "skills/ego-browser/references") + "/") && target.endsWith(".md");
       const visual = SIMPLE && /^browser-visual-[\w-]+\.png$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
-      const egoOutput = SIMPLE && /^ego-output-[0-9a-f-]{36}\.txt$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
+      const egoOutput = SIMPLE && /^(?:ego-output-[0-9a-f-]{36}\.txt|ego-result-[0-9a-f-]{36}\.json)$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
       if (visual) return { content: [{ type: "image", mimeType: "image/png", data: (await readJobFile(target)).toString("base64") }] };
       if (target !== skill && !skillReference && !egoOutput && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and this job's evidence");
       const text = target === skill || skillReference ? await readFile(target, "utf8") : (await readJobFile(target, 25 * 1024 * 1024)).toString("utf8");
       const lines = text.split("\n"), start = (params.offset ?? 1) - 1;
-      const result = toolText(lines.slice(start, start + (params.limit ?? 500)).join("\n"));
-      result.details = { totalLines: lines.length, offset: start + 1 };
+      const chunks = utf8Chunks(lines.slice(start, start + (params.limit ?? 500)).join("\n"), egoOutput ? SIMPLE_PREVIEW_BYTES : MAX_TEXT_BYTES - 1024);
+      const chunk = params.chunk ?? 1;
+      if (chunk > Math.max(1, chunks.length)) throw new Error("Read chunk is out of range");
+      const result = toolText((chunks[chunk - 1] ?? "") + (chunks.length > 1
+        ? `\n[Chunk ${chunk}/${chunks.length} of selected lines; ${chunk < chunks.length ? `keep path/offset/limit and use chunk=${chunk + 1} for more` : "selected lines complete"}.]` : ""));
+      result.details = { totalLines: lines.length, offset: start + 1, chunk, chunks: chunks.length };
+      if (egoOutput) await safeMetric("browser_preview_retrieval", performance.now(), {
+        bytes: Buffer.byteLength(JSON.stringify(result.content)), offset: start + 1,
+      });
       return result;
     },
   });
@@ -1078,12 +1189,19 @@ export default function cventJobTools(pi: any) {
         const result = { logs, ...rest };
         await atomicJson(join(jobDir, "browser-last-script-result.json"), result);
         const text = (logs ?? []).map((v: any) => typeof v === "string" ? v : JSON.stringify(v)).join("\n");
-        const outputPath = join(jobDir, `ego-output-${randomUUID()}.txt`);
+        const artifactId = randomUUID();
+        const outputPath = join(jobDir, `ego-output-${artifactId}.txt`);
+        const resultPath = join(jobDir, `ego-result-${artifactId}.json`);
+        await atomicJson(resultPath, result);
         const file = await open(outputPath, "wx", 0o600);
         try { await file.writeFile(text, "utf8"); } finally { await file.close(); }
         const response = await toolBrowserResult(result);
-        response.content[0].text = utf8Chunks(text || "(no printed output)", MAX_TEXT_BYTES)[0] +
-          `\n[Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves. Full output: ${outputPath}; use read offset/limit.]`;
+        const preview = utf8Chunks(text || "(no printed output)", SIMPLE_PREVIEW_BYTES)[0];
+        const truncated = Buffer.byteLength(text, "utf8") > SIMPLE_PREVIEW_BYTES;
+        await safeMetric("browser_preview", performance.now(), { fullBytes: Buffer.byteLength(text),
+          previewBytes: Buffer.byteLength(preview), truncated });
+        response.content[0].text = preview + (truncated ? "\n[Preview truncated at 12KB. Full evidence is preserved; read the relevant omitted lines before drawing conclusions.]" : "") +
+          `\n[Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves. Full output: ${outputPath}; structured evidence: ${resultPath}; use read offset/limit/chunk.]`;
         return response;
       });
       const header = match[2].match(/^\s*\/\/ cvent: (\{[^\n]+\})/);
@@ -1283,8 +1401,8 @@ export default function cventJobTools(pi: any) {
       status: Type.Optional(literalUnion(["running", "login_required", "review_required"])),
       stage: Type.Optional(SIMPLE ? Type.String({ maxLength: 80 }) : literalUnion(JOB_STAGES)),
       action: Type.Optional(Type.String({ maxLength: 1200 })),
-      completed: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
-      pending: Type.Optional(Type.Array(Type.String({ maxLength: 80 }), { maxItems: 20 })),
+      completed: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
+      pending: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
       reviewRequired: optionalStrings,
       verification: Type.Optional(Type.String({ maxLength: 6000, description: "Simple Mode: your determination from fresh persisted readback, not merely 'Save clicked'. Records verification in the audit; no RR cell metadata required." })),
       log: Type.Optional(Type.String({ maxLength: 1200 })),
@@ -1458,6 +1576,24 @@ export default function cventJobTools(pi: any) {
     parameters: Type.Object({}),
     async execute(_id: string, _params: unknown, signal: AbortSignal) {
       return withQueue("browser", async () => {
+        const gatePath = join(jobDir, "browser-gate.json");
+        const statePath = join(jobDir, "state.json");
+        const endLoginWait = async (reason: string) => {
+          const state = await readJson(statePath, {});
+          state.status = "login_required";
+          state.current_stage = "login_handoff";
+          state.current_action = "Login wait ended. Continue this job to reopen its browser and complete sign-in.";
+          state.updated_at = new Date().toISOString();
+          await atomicJson(statePath, state);
+          await appendActivity(`${reason}; ending Pi run so normal teardown releases the worker`);
+          return { ...toolText({ ok: false, loginRequired: true, reason, instruction: state.current_action }), terminate: true };
+        };
+        const initialGate = await readJson(gatePath, {});
+        if (initialGate.ownership === "USER" && initialGate.desiredOwnership === "USER") {
+          // Do not repeatedly call pageInfo/authStatus through a USER-owned gate.
+          // The controller, not this tool, owns lease teardown and uncertainty QA.
+          return endLoginWait("Browser is still handed to the user");
+        }
         let pageResult = await invokeBrowser("pageInfo", { intent: "read" }, signal, 45);
         let pageUrl = String(pageResult?.page?.url ?? "");
         let pageTitle = String(pageResult?.page?.title ?? "");
@@ -1498,12 +1634,10 @@ export default function cventJobTools(pi: any) {
             instruction: "Cvent login already active in this worker's isolated profile; fresh-read a complete snapshot and continue." });
         }
 
-        const gatePath = join(jobDir, "browser-gate.json");
         const gate = await readJson(gatePath, {});
         if (gate.ownership !== "AGENT" || gate.desiredOwnership !== "AGENT" || ![undefined, null, "NONE"].includes(gate.activeActor)) {
           throw new Error("Login handoff requires an idle agent-owned browser gate");
         }
-        const statePath = join(jobDir, "state.json");
         const state = await readJson(statePath, {});
         if (SIMPLE) state.resume_stage = state.current_stage;
         state.status = "login_required";
@@ -1519,7 +1653,8 @@ export default function cventJobTools(pi: any) {
         gate.pausedPids = [process.pid];
         gate.transition = null;
         gate.updatedAt = new Date().toISOString();
-        await atomicJson(gatePath, gate);
+        if (BENCHMARK) await benchmarkCall("handoff", {});
+        else await atomicJson(gatePath, gate);
         await appendActivity("Cvent login required; browser control handed to user for SSO/MFA");
         const humanHandoffStarted = performance.now();
 
@@ -1546,7 +1681,7 @@ export default function cventJobTools(pi: any) {
           if (current.ownership === "NONE") throw new Error("Browser return was blocked; human review is required");
         }
         await safeMetric("human_handoff", humanHandoffStarted, { boundary: "cvent_sso_mfa", completed: false });
-        throw new Error("Cvent login handoff timed out after 60 minutes");
+        return endLoginWait("Cvent login handoff timed out after 60 minutes");
       });
     },
   });
@@ -1808,8 +1943,9 @@ export default function cventJobTools(pi: any) {
   const simpleDomainAssessments = Type.Array(Type.Object({
     domain: Type.String({ minLength: 1, maxLength: 80 }),
     outcome: literalUnion(["verified", "review_required", "prohibited"]),
+    allSafeWorkAttempted: Type.Boolean({ description: "True only after attempting every independent permissible requirement in this domain. Unvisited or deferred safe work means false. Exact item-level exceptions need actual attempt evidence; volume and elapsed time are not blockers." }),
     evidence: Type.Array(Type.String({ minLength: 1, maxLength: 3000 }), { minItems: 1, maxItems: 100 }),
-  }), { maxItems: 50, description: "Simple Mode: one assessment for every populated RR domain. Order is yours; coverage is mandatory before final QA." });
+  }), { maxItems: 1000, description: "Simple Mode: assess every populated compiled domain plus any additional domains you discover in the original workbook. You choose the categories and order; the compiler is only a coverage floor." });
 
   pi.registerTool({
     name: "cvent_finish",
@@ -1859,22 +1995,27 @@ export default function cventJobTools(pi: any) {
           for (const assessment of params.domainAssessments ?? []) {
             const domain = String(assessment?.domain ?? "").trim();
             if (!domain || assessments.has(domain)) throw new Error("Each Simple Mode domain assessment must have a unique non-empty domain");
-            if (requiredCounts.size && !requiredCounts.has(domain)) throw new Error(`Unknown or unpopulated RR domain assessment: ${domain}`);
-            assessments.set(domain, { domain, outcome: assessment.outcome, evidence: assessment.evidence, rr_item_count: requiredCounts.get(domain) ?? null });
+            if (!Array.isArray(assessment.evidence) || !assessment.evidence.length || assessment.evidence.some((item: unknown) => !String(item ?? "").trim()))
+              throw new Error(`Domain ${domain} needs actual non-empty Cvent evidence`);
+            if (!["verified", "review_required", "prohibited"].includes(assessment.outcome)) throw new Error(`Invalid domain outcome: ${domain}`);
+            assessments.set(domain, { domain, outcome: assessment.outcome, all_safe_work_attempted: assessment.allSafeWorkAttempted === true,
+              evidence: assessment.evidence, rr_item_count: requiredCounts.get(domain) ?? null });
           }
           if (!params.jobWideBlocker && requiredCounts.size) {
             const outstanding = [...requiredCounts.keys()].filter(domain => !assessments.has(domain));
             if (outstanding.length) throw new Error(`Do not finish early. Inspect and attempt independent safe work in: ${outstanding.join(", ")}. Hold only item-level exceptions, not untouched domains.`);
           }
+          if (!params.jobWideBlocker) {
+            if (!assessments.size) throw new Error("Assess the original workbook before finishing, even when the optional compiler has no categories");
+            const unfinished = [...assessments.values()].filter(assessment => !assessment.all_safe_work_attempted);
+            if (unfinished.length) throw new Error(`Unfinished safe work remains in: ${unfinished.map(item => item.domain).join(", ")}. Continue dynamically with Ego; do not relabel pending work as review.`);
+          }
           if (params.status === "DRAFT_COMPLETE" && [...assessments.values()].some(assessment => assessment.outcome !== "verified"))
             throw new Error("DRAFT_COMPLETE requires every populated RR domain assessment to be verified");
           if (params.status === "REVIEW_REQUIRED") {
             if (!params.unresolvedItems.length) throw new Error("REVIEW_REQUIRED needs exact unresolved item-level exceptions");
-            if (requiredCounts.size && ![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
+            if (![...assessments.values()].some(assessment => assessment.outcome === "review_required" || assessment.outcome === "prohibited"))
               throw new Error("REVIEW_REQUIRED needs at least one domain assessment with a review_required or prohibited outcome");
-            const unfinished = [...assessments.values()].filter(assessment => assessment.evidence.some((entry: unknown) => /(?:time constraints?|not (?:fully |all )?verified|was not (?:verified|configured|inspected|attempted)|were not (?:verified|configured|inspected|attempted))/i.test(String(entry))));
-            if (unfinished.length)
-              throw new Error(`REVIEW_REQUIRED cannot substitute for unfinished safe work. Continue dynamically with Ego in: ${unfinished.map(item => item.domain).join(", ")}.`);
           }
           const report = { status: params.status, execution_mode: "simple", reported_by: "pi",
             job_wide_blocker: params.jobWideBlocker ?? null, completion_reason: params.blockerEvidence ?? "Pi final QA; see actual evidence and review items",

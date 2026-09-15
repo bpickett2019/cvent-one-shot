@@ -3,12 +3,14 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 from control_store import ControlStore
-from job_runner import JobRunner, classify_process_outcome
+from job_runner import ActiveJob, JobRunner, classify_process_outcome, stopped_job_action
 from runtime_config import DEFAULT_EVENT_KEY, DEFAULT_EVENT_NAME
 
 
@@ -67,6 +69,53 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             self.assertEqual(self.runner.prepare_rr(self.job,1),{})
         self.assertTrue(original.exists())
         self.assertFalse((self.directory/'expected-domains.json').exists())
+        archived = list((self.directory/'compiler-diagnostics').glob('*/expected-domains.json'))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(json.loads(archived[0].read_text()), {'stale': True})
+        performance = json.loads((self.directory/'preflight-performance.json').read_text())
+        self.assertEqual(performance['source'], 'original_workbook')
+
+    def test_simple_compiler_timeout_or_unavailable_uses_original_without_browser(self):
+        for error in (subprocess.TimeoutExpired('compiler', 180), FileNotFoundError('compiler')):
+            with self.subTest(error=type(error).__name__):
+                commands = []
+                def run(command, **kwargs):
+                    commands.append(command)
+                    if command[1].endswith('inspect_rr.py'):
+                        return subprocess.CompletedProcess(command, 0, '', '')
+                    raise error
+                with patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'simple'}), patch('job_runner.job_dir',return_value=self.directory), patch.object(subprocess,'run',side_effect=run):
+                    self.assertEqual(self.runner.prepare_rr(self.job,1),{})
+                self.assertEqual(len(commands), 2)
+                self.assertIn(type(error).__name__, json.loads((self.directory/'preflight-performance.json').read_text())['compilerWarning'])
+
+    def test_original_workbook_read_failure_still_stops_before_browser(self):
+        for result in (subprocess.TimeoutExpired('inspection',180), subprocess.CompletedProcess([],1,'','Corrupt Excel')):
+            with self.subTest(result=str(result)), patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'simple'}), patch('job_runner.job_dir',return_value=self.directory):
+                with patch.object(subprocess,'run',side_effect=result if isinstance(result,Exception) else None,return_value=result) as run:
+                    with self.assertRaisesRegex(RuntimeError, 'RR preflight failed'):
+                        self.runner.prepare_rr(self.job,1)
+                    self.assertEqual(run.call_count,1)
+
+    def test_simple_wrong_event_or_malformed_compiler_hints_are_archived_not_used(self):
+        (self.directory/'input.xlsx').write_bytes(b'original workbook')
+        for hints in ([], {'rr':{},'target':{'eventId':'wrong-event'}}):
+            with self.subTest(hints=hints):
+                (self.directory/'expected-domains.json').write_text(json.dumps(hints))
+                (self.directory/'rr-validation.json').write_text(json.dumps({'rrSha256':'wrong'}))
+                (self.directory/'configuration-plan.json').write_text(json.dumps({'target':{'eventId':'wrong-event'}}))
+                result=subprocess.CompletedProcess([],0,'','')
+                with patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'simple'}), patch('job_runner.job_dir',return_value=self.directory), patch.object(subprocess,'run',return_value=result):
+                    self.assertEqual(self.runner.prepare_rr(self.job,1),{})
+                self.assertFalse((self.directory/'expected-domains.json').exists())
+                self.assertFalse((self.directory/'rr-validation.json').exists())
+        self.assertEqual(len(list((self.directory/'compiler-diagnostics').glob('*/expected-domains.json'))),2)
+
+    def test_legacy_mode_does_not_fall_back_on_compiler_timeout(self):
+        result=subprocess.CompletedProcess([],0,'','')
+        with patch.dict(os.environ, {'CVENT_EXECUTION_MODE':'legacy'}), patch('job_runner.job_dir',return_value=self.directory), patch.object(subprocess,'run',side_effect=[result,subprocess.TimeoutExpired('compiler',180)]):
+            with self.assertRaisesRegex(RuntimeError, 'rr_extraction'):
+                self.runner.prepare_rr(self.job,1)
 
     def test_worker_profiles_persist_per_workspace_and_never_share_between_slots(self):
         first = self.runner.environment(self.job, "lease-token", 1)
@@ -178,6 +227,50 @@ class JobRunnerConfigurationTests(unittest.TestCase):
             classify_process_outcome(1, "INCOMPLETE", "running", False, False, None)[0],
             "failed_prewrite",
         )
+
+    def test_login_handoff_exit_is_not_completion_and_preserves_uncertainty(self):
+        self.assertEqual(classify_process_outcome(0, "", "login_required", False, False, None),
+                         ("login_required", False, None))
+        self.assertEqual(classify_process_outcome(0, "", "login_required", True, False, None),
+                         ("login_required", False, None))
+        self.assertEqual(classify_process_outcome(0, "", "login_required", True, True, None)[0:2],
+                         ("failed_uncertain", True))
+        action = stopped_job_action("login_required", None)
+        self.assertIn("worker released", action)
+        self.assertIn("Continue this job", action)
+        self.assertEqual(stopped_job_action("failed_uncertain", "Unresolved mutation"), "Unresolved mutation")
+        self.assertEqual(stopped_job_action("completed", None), "Draft build complete")
+
+    def test_login_timeout_monitor_releases_worker_and_event_for_next_job(self):
+        store = self.runner.store
+        user = store.ensure_user("local-test", "test@example.test", "Test", False)
+        event = SimpleNamespace(event_id=DEFAULT_EVENT_KEY, event_key=DEFAULT_EVENT_KEY, name=DEFAULT_EVENT_NAME)
+        job = store.create_job(user, event, "rr.xlsx", preferred_slot=1)
+        lease = store.reserve_now(job["id"], user["subject"])
+        process = Mock(pid=987654)
+        process.wait.return_value = 0
+        active = ActiveJob(job["id"], lease["token"], 1, threading.Event(), process)
+        self.runner._active[job["id"]] = active
+        (self.directory / "state.json").write_text(json.dumps({"status": "login_required", "pending": ["Untouched RR work"]}))
+        (self.directory / "browser-gate.json").write_text(json.dumps({"ownership": "USER", "desiredOwnership": "USER"}))
+        with patch("job_runner.job_dir", return_value=self.directory), \
+             patch.object(self.runner, "steel_command") as steel, \
+             patch.object(self.runner, "prepare_environment", return_value={}), \
+             patch("job_runner.subprocess.run"), patch("job_runner.write_telemetry_report"):
+            self.runner._monitor(job, active)
+        steel.assert_called_once_with(job, lease["token"], 1, "release", timeout=60)
+        self.assertEqual(store.get_job(job["id"])["state"], "login_required")
+        self.assertFalse(store.get_job(job["id"])["uncertain"])
+        self.assertIsNone(self.runner.active(job["id"]))
+        self.assertTrue(active.stop_heartbeat.is_set())
+        state = json.loads((self.directory / "state.json").read_text())
+        self.assertIsNone(state["pi_pid"])
+        self.assertEqual(state["pending"], ["Untouched RR work"])
+        self.assertIn("worker released", state["current_action"])
+        # No force-unlock: the actual monitor/ControlStore finish path releases
+        # both leases. The stale USER gate alone must not reserve the worker.
+        next_job = store.create_job(user, event, "next.xlsx", preferred_slot=1)
+        self.assertEqual(store.reserve_now(next_job["id"], user["subject"])["slot_id"], 1)
 
     def test_provider_failure_after_conclusive_write_readback_is_recoverable(self):
         outcome = classify_process_outcome(1, "", "running", True, False, "Anthropic API credit balance is too low")
