@@ -199,6 +199,21 @@ a full RR, an alternative worker launch path, production allowance reduction,
 provider-limit proof, or invoice reconciliation. Preserve `smoke-evidence.json`
 and `after-genuine-response-meter.json`; failures/unknown usage remain explicit.
 
+The diagnostic now retains only physical fetch count, numeric HTTP status,
+response format (`sse`/`json`/`other`), allowlisted transport exception category,
+and a fixed guard stop code. It never records request/response bodies, raw
+headers, provider error messages, prompts, keys or SDK stderr. These observations
+are **not** usage receipts, billing evidence, or proof that an HTTP error was
+free. A 200 response without settlement remains UNKNOWN; provider error category
+and request ID are intentionally not collected by this minimal diagnostic.
+
+**Outstanding-usage incident:** the original diagnostic at
+`/var/tmp/cvent-benchmark-smoke-735f5f9/` has one UNKNOWN request. Do not invoke this
+command again, including with a new output directory, until that usage has been
+reconciled and a further genuine request explicitly authorized. New diagnostics
+cannot recover the original missing HTTP status. Offline fake-transport tests
+use isolated temporary databases only; they do not clear the original incident.
+
 ## Release evidence
 
 A release must preserve its exact commit, selected-runtime offline suite result,
