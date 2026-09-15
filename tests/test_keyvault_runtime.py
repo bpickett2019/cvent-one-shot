@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -49,6 +51,17 @@ class KeyVaultRuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, {"CVENT_ENV": "development"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "explicit staging tunnel fallback"):
                 run_with_keyvault.selected_secrets()
+
+    def test_fixed_no_cvent_diagnostic_is_not_a_general_command_exemption(self):
+        script = Path(run_with_keyvault.__file__).resolve().parent / 'scripts/benchmark_smoke.py'
+        command = [sys.executable, str(script), '--allow-paid-no-cvent', '--output', '/tmp/new-private-diagnostic']
+        with patch.dict(os.environ, {'CVENT_STAGING_TUNNEL_FALLBACK': '1'}, clear=True):
+            run_with_keyvault.validate_staging_command(command)
+            for bad in ([sys.executable, '/tmp/benchmark_smoke.py', *command[2:]],
+                        [sys.executable, str(script), '--job', *command[3:]],
+                        [*command, '--model', 'other'], ['/bin/sh', *command[1:]]):
+                with self.assertRaises(RuntimeError):
+                    run_with_keyvault.validate_staging_command(bad)
 
     def test_staging_fallback_allows_only_loopback_app_or_bounded_probe(self):
         environment = {"CVENT_STAGING_TUNNEL_FALLBACK": "1"}

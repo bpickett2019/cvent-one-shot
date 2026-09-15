@@ -88,6 +88,12 @@ def validate_staging_command(command: list[str]) -> None:
         is_bounded_probe = False
     if is_bounded_probe:
         return
+    # Fixed no-tools diagnostic only; never a general staging command exemption.
+    if (len(command) == 5
+            and Path(command[0]).resolve() == Path(sys.executable).resolve()
+            and Path(command[1]).resolve() == Path(__file__).resolve().parent / "scripts/benchmark_smoke.py"
+            and command[2:4] == ["--allow-paid-no-cvent", "--output"]):
+        return
     try:
         host = command[command.index("--host") + 1]
     except (ValueError, IndexError) as exc:

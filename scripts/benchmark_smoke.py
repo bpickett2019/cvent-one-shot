@@ -28,7 +28,7 @@ def main():
     args = parser.parse_args()
     if not os.environ.get('ANTHROPIC_API_KEY'):
         raise SystemExit('Deployed Anthropic API key is required; no OAuth/key fallback')
-    revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    revision = subprocess.check_output(['git', '-c', f'safe.directory={ROOT}', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     folder = args.output.resolve()
     folder.mkdir(mode=0o700, parents=False, exist_ok=False)
     store = ControlStore(folder / 'control.db', lease_seconds=300)
@@ -81,6 +81,8 @@ def main():
         process.wait(timeout=10)
     finally:
         if process.poll() is None: process.kill(); process.wait()
+        process.stdin.close()
+        process.stdout.close()
     snapshot = costs.snapshot(job['id'])
     passed = bool(result.get('secondBlocked') and persisted and snapshot['accounting_complete']
                   and snapshot['physical_attempts'] == 1 and snapshot['cumulative_cost_micro'] > 0)
