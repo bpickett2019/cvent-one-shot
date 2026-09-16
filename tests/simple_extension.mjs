@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRequire, stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const root=process.cwd(), directory=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'simple-offline-'));
@@ -84,11 +85,30 @@ try {
   const attempt={at,operation:'click#one',rrSource:'uploaded RR',eventKey:'event',result:'attempted'};
   fs.writeFileSync(path.join(directory,'scope-write-audit.jsonl'),JSON.stringify(attempt)+'\n');
   save('browser-write-readback-required.json',{executionMode:'simple',browserRuntimeId:'runtime',attempts:[attempt]});
-  await assert.rejects(tools.get('cvent_job_update').execute('not-observed',{verification:'Saved'}),/fresh observation/);
-  save('browser-last-atomic-readback.json',{executionMode:'simple',browserRuntimeId:'runtime',eventKey:'event',observedAt:'2026-01-01T00:00:01.000Z',evidence:{snapshot:'persisted value'}});
-  await tools.get('cvent_job_update').execute('pi-verifies',{verification:'Reopened persisted configuration and the requested value matches.'});
-  assert(!fs.existsSync(path.join(directory,'browser-write-readback-required.json')));
-  assert(fs.readFileSync(path.join(directory,'scope-write-audit.jsonl'),'utf8').includes('"resolvedBy":"pi"'));
+  const auditBefore=fs.readFileSync(path.join(directory,'scope-write-audit.jsonl'),'utf8');
+  const pendingBefore=fs.readFileSync(path.join(directory,'browser-write-readback-required.json'),'utf8');
+  await assert.rejects(tools.get('cvent_job_update').execute('not-observed',{verification:'Saved'}),/PERSISTENCE_RECONCILIATION_REQUIRED/);
+  save('browser-last-atomic-readback.json',{executionMode:'simple',browserRuntimeId:'runtime',eventKey:'event',observedAt:'2026-01-01T00:00:01.000Z',evidence:{snapshot:'unrelated footer; requested value did not persist'}});
+  await assert.rejects(tools.get('cvent_job_update').execute('false-pi-verification',{verification:'All requested values match.'}),/PERSISTENCE_RECONCILIATION_REQUIRED/);
+  await assert.rejects(tools.get('cvent_finish').execute('false-final-verification',{status:'DRAFT_COMPLETE',realReads:['All values persisted']}),/PERSISTENCE_RECONCILIATION_REQUIRED/);
+  assert.equal(fs.readFileSync(path.join(directory,'scope-write-audit.jsonl'),'utf8'),auditBefore);
+  assert.equal(fs.readFileSync(path.join(directory,'browser-write-readback-required.json'),'utf8'),pendingBefore);
+  fs.writeFileSync(path.join(directory,'browser-write-readback-required.json'),'malformed');
+  await assert.rejects(tools.get('cvent_job_update').execute('corrupt-marker',{verification:'Saved'}),/PERSISTENCE_RECONCILIATION_REQUIRED/);
+  fs.writeFileSync(path.join(directory,'browser-write-readback-required.json'),pendingBefore);
+  save('browser-mutation-uncertain.json',{reason:'response lost'});
+  fs.unlinkSync(path.join(directory,'browser-write-readback-required.json'));
+  await assert.rejects(tools.get('cvent_job_update').execute('uncertain-only',{verification:'Saved'}),/PERSISTENCE_RECONCILIATION_REQUIRED/);
+  // Simulate independent operator reconciliation, NOT a Pi tool capability.
+  save('operator-readback.json',{outcome:'NOT_PERSISTED',observed:'old value'});
+  save('mutation-resolutions.json',{resolutions:[{attemptAt:at,operation:attempt.operation,rrSource:attempt.rrSource,
+    actor:'operator',outcome:'NOT_PERSISTED',evidencePath:'operator-readback.json',
+    evidenceSha256:createHash('sha256').update(fs.readFileSync(path.join(directory,'operator-readback.json'))).digest('hex')}]});
+  fs.unlinkSync(path.join(directory,'browser-mutation-uncertain.json'));
+  assert.equal(fs.readFileSync(path.join(directory,'scope-write-audit.jsonl'),'utf8'),auditBefore);
+  // Upstream capability instructions are no longer readable in Simple Mode.
+  for(const path of ['skills/ego-browser/SKILL.md','skills/ego-browser/references/api.md'])
+    await assert.rejects(tools.get('read').execute('not-the-runtime-contract',{path:root+'/'+path}),/Read is limited/);
   // Many ordinary browser failures remain tool errors, never a controller terminal.
   fs.writeFileSync(helper,'import sys\nprint(\'BROWSER_ROUTER_RESULT={"ok":false,"error":"stale ref: page changed"}\')\nsys.exit(1)');
   for(let i=0;i<4;i++){
@@ -210,5 +230,5 @@ print('BROWSER_ROUTER_RESULT='+json.dumps(out))
   assert.match(load(`usage-budget-stop-${process.pid}.json`).reason,/API spend/);
   await hooks.get('session_start')();
   assert.equal((await hooks.get('tool_call')({toolName:'bash',input:native})).terminate,true);
-  console.log('Simple extension: dynamic coverage, handoff, bounded previews and usage checkpoints PASS');
+  console.log('Simple extension: persistence holds, dynamic coverage, handoff, bounded previews and usage checkpoints PASS');
 } finally {fs.rmSync(directory,{recursive:true,force:true})}

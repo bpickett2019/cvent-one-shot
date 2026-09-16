@@ -67,6 +67,8 @@ class BenchmarkLauncherTests(unittest.TestCase):
             trace_path = directory/'offline-network.jsonl'
             trace = [json.loads(l) for l in trace_path.read_text().splitlines()] if trace_path.exists() else []
             markers = list(directory.glob('model-admission-stop-*.json'))
+            contract = directory/'offline-contract.json'
+            self.contract = json.loads(contract.read_text()) if contract.exists() else None
             return completed, snapshot, trace, bool(markers)
 
     def test_actual_launcher_settles_one_response_without_browser_tools(self):
@@ -78,6 +80,26 @@ class BenchmarkLauncherTests(unittest.TestCase):
         self.assertTrue(snapshot['accounting_complete'])
         self.assertFalse(stopped)
         self.assertEqual([r['operation'] for r in trace if r['kind'] == 'controller'], ['register', 'reserve', 'dispatch', 'settle'])
+
+    def test_effective_simple_system_and_tools_use_only_cvent_contract(self):
+        completed, _, _, _ = self.launch('normal')
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        system = json.dumps(self.contract['system'])
+        self.assertIn('You configure the selected Cvent event', system)
+        self.assertIn('not a general coding assistant', system)
+        self.assertIn('does not independently reason', system)
+        self.assertNotIn('expert coding assistant', system)
+        self.assertNotIn('Use bash for file operations', system)
+        self.assertNotIn('available_skills', system)
+        self.assertNotIn('skills/ego-browser', system)
+        tools = {tool['name']: tool for tool in self.contract['tools']}
+        self.assertEqual(set(tools), {'read','bash','cvent_open_event','cvent_login_handoff','cvent_job_update','cvent_finish'})
+        self.assertIn('No shell or Node.js imports', tools['bash']['description'])
+        self.assertNotIn('upstream', tools['bash']['description'])
+        mission = (ROOT/'PI_SIMPLE_PROMPT.md').read_text()
+        self.assertNotIn('skills/ego-browser/SKILL.md', mission)
+        self.assertIn('locator/getByRole result (no other methods or chaining)', mission)
+        self.assertIn('operator reconciliation', mission)
 
     def test_actual_launcher_resume_in_new_process_keeps_previous_consumption(self):
         completed, snapshot, trace, stopped = self.launch('normal', resume=True)

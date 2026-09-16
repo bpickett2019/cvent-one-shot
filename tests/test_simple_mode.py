@@ -1,5 +1,6 @@
 """Execute the actual Simple Mode wrapper with fake browser I/O, never Cvent."""
 import json
+import hashlib
 import os
 import subprocess
 import unittest
@@ -24,8 +25,8 @@ class SimpleModeTests(unittest.TestCase):
 import fs from 'node:fs';
 let state=JSON.parse(fs.readFileSync('fake-page.json','utf8'));
 const store=()=>fs.writeFileSync('fake-page.json',JSON.stringify(state));
-const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@bare-title':'* Title:','@code':'Event Code','@field':'Venue','@check':'Enabled','@select':'Choice','@file':'Upload','@link':'Show Hours','@editor':'Editor'};
-function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':target==='@link'?'A':target==='@editor'?'DIV':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':target==='@editor'?'textbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
+const labels={'@save':'Save','@edit':'Edit','@delete':'Delete','@archive':'Archive','@remove':'Remove','@publish':'Publish','@send':'Send','@schedule':'Schedule','@test-send':'Test Send','@new':'Create Event','@identity':'Event Name','@bare-title':'* Title:','@code':'Event Code','@field':'Venue','@limit':'Maximum uses','@check':'Enabled','@select':'Choice','@file':'Upload','@link':'Show Hours','@editor':'Editor'};
+function descriptor(target){if(!labels[target])throw Error('Stale ref / control not found');return {tag:['@field','@limit','@identity','@code','@file','@check'].includes(target)?'INPUT':target==='@select'?'SELECT':target==='@link'?'A':target==='@editor'?'DIV':'BUTTON',label:labels[target],role:target==='@check'?'checkbox':target==='@editor'?'textbox':null,connected:true,disabled:false,value:state.value,documentUrl:process.env.FRAME_URL||state.url,options:[{label:'Choice',value:'choice',disabled:false}]}}
 export async function listTabs(){return [{id:'target'}]}
 export async function switchTab(){}
 export async function pageInfo(){return {url:state.url,title:'Selected Event'}}
@@ -38,20 +39,20 @@ export async function evaluate(expression){
  if(expression.includes('const wanted='))return true;
  return false;
 }
-export async function evaluateLocator(target,fn){const d=descriptor(target);if(String(fn).includes('attributeNames=')){const link={text:'Show Hours',href:'https://bdny.com/about-bdny/',rawHref:'https://bdny.com/about-bdny/',target:'_blank',rel:null};return {...d,text:d.label,value:target==='@field'?state.value:null,checked:target==='@check'?Boolean(state.value):null,enabled:true,visible:true,editable:target==='@editor',attributes:{href:target==='@link'?link.href:null,target:target==='@link'?'_blank':null,rel:null,title:null,name:null,placeholder:null,'aria-label':null,'aria-expanded':null,'aria-checked':null,'aria-selected':null,role:d.role,contenteditable:target==='@editor'?'true':null,type:null},href:target==='@link'?link.href:null,selectedText:target==='@editor'?'Show Hours':'',html:target==='@editor'?'<p><a href="https://bdny.com/about-bdny/">Show Hours</a></p>':null,htmlTruncated:false,links:target==='@editor'?[link]:target==='@link'?[link]:[]}}return d}
-export async function fill(target,text){state.value=text;if(!state.editor)state.persisted=text;store();if(text==='hiccup')throw Error('Recoverable field dispatch hiccup')}
+export async function evaluateLocator(target,fn){const d=descriptor(target);if(String(fn).includes('attributeNames=')){const link={text:'Show Hours',href:'https://bdny.com/about-bdny/',rawHref:'https://bdny.com/about-bdny/',target:'_blank',rel:null};return {...d,text:d.label,value:target==='@field'?state.value:target==='@limit'?state.limit:null,checked:target==='@check'?Boolean(state.value):null,enabled:true,visible:true,editable:target==='@editor',attributes:{href:target==='@link'?link.href:null,target:target==='@link'?'_blank':null,rel:null,title:null,name:null,placeholder:null,'aria-label':null,'aria-expanded':null,'aria-checked':null,'aria-selected':null,role:d.role,contenteditable:target==='@editor'?'true':null,type:null},href:target==='@link'?link.href:null,selectedText:target==='@editor'?'Show Hours':'',html:target==='@editor'?'<p><a href="https://bdny.com/about-bdny/">Show Hours</a></p>':null,htmlTruncated:false,links:target==='@editor'?[link]:target==='@link'?[link]:[]}}return d}
+export async function fill(target,text){if(target==='@limit')state.limit=text;else state.value=text;if(!state.editor)state.persisted=text;store();if(text==='hiccup')throw Error('Recoverable field dispatch hiccup')}
 export async function focus(target){state.focused=target;store()}
 export async function insertText(text){return fill(state.focused||'@field',text)}
-export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;if(state.recordKey)state.records[state.recordKey]=state.value;state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
+export async function click(target){descriptor(target);if(target==='@save'){state.persisted=state.value;if(state.recordKey){state.records[state.recordKey]=state.value;if(state.limits)state.limits[state.recordKey]=state.limit}state.editor=false;store();if(process.env.SAVE_THROW)throw Error('Save response lost')}if(target==='@edit'){state.editor=true;store()}}
 export async function press(){}
 export async function down(){}
 export async function up(){}
-export async function snapshot(){return JSON.stringify(state)}
+export async function snapshot(){if(process.env.SNAPSHOT_THROW)throw Error('Readback failed');return JSON.stringify(state)}
 export async function screenshot(){return 'browser-visual-test.png'}
 export async function waitForTimeout(){}
 export async function waitForLoadState(){}
 export async function waitForSelector(target){descriptor(target)}
-export async function goto(url){state.url=url;const key=new URL(url).searchParams.get('recordId');if(key){state.recordKey=key;state.value=state.records[key]??'';state.persisted=state.value;state.editor=true}store()}
+export async function goto(url){state.url=url;const key=new URL(url).searchParams.get('recordId');if(key){state.recordKey=key;state.value=state.records[key]??'';state.persisted=state.value;if(state.limits)state.limit=state.limits[key];state.editor=true}store()}
 export async function hover(){}
 export async function wheel(){}
 export async function selectOption(target,option){state.value=option;store()}
@@ -95,11 +96,124 @@ export async function setInputFiles(target,files){state.files=files;store()}
         _, failed=self.run_simple("await page.click('@save');", SAVE_THROW='1')
         self.assertTrue(failed['unresolvedWrites'])
         self.assertTrue(mutation_outcome(self.folder)['unresolved'])
-        self.assertFalse((self.folder/'browser-mutation-uncertain.json').exists())
+        self.assertTrue((self.folder/'browser-mutation-uncertain.json').exists())
         _, observed=self.run_simple("console.log(await page.snapshot());")
         self.assertTrue(observed['ok'],observed)
         self.assertEqual(observed['readbacks'],1)
         self.assertEqual(json.loads(self.state.read_text())['persisted'],'new')
+
+    def reconcile_as_operator(self):
+        # Test-only simulation of evidence-backed operator review and marker
+        # disposition. Neither Ego nor Pi has filesystem write access to this.
+        evidence=self.folder/'operator-readback.json'
+        evidence.write_bytes(self.state.read_bytes())
+        attempts=[json.loads(line) for line in (self.folder/'scope-write-audit.jsonl').read_text().splitlines()
+                  if json.loads(line)['result']=='attempted']
+        resolutions=[{'attemptAt':a['at'],'operation':a['operation'],'rrSource':a['rrSource'],
+                      'actor':'operator','outcome':'PERSISTED','evidencePath':evidence.name,
+                      'evidenceSha256':hashlib.sha256(evidence.read_bytes()).hexdigest()} for a in attempts]
+        (self.folder/'mutation-resolutions.json').write_text(json.dumps({'resolutions':resolutions}))
+        for name in ('browser-write-readback-required.json','browser-mutation-uncertain.json'):
+            (self.folder/name).unlink(missing_ok=True)
+
+    def test_caught_save_failure_latches_subsequent_writes_in_same_script(self):
+        _, result=self.run_simple("await page.fill('@field','committed'); try { await page.click('@save') } catch(e) { console.log(e.message) } console.log(await page.readTarget('@field')); await page.fill('@field','unsafe replay');", SAVE_THROW='1')
+        self.assertFalse(result['ok'],result)
+        self.assertIn('MUTATION_RECONCILIATION_REQUIRED',result['error'])
+        self.assertEqual(json.loads(self.state.read_text())['value'],'committed')
+        self.assertTrue(mutation_outcome(self.folder)['unresolved'])
+
+    def test_inherited_pending_blocks_writes_after_successful_batch(self):
+        _, first=self.run_simple("await page.fill('@field','saved'); await page.click('@save'); console.log(await page.readTarget('@field'));")
+        self.assertTrue(first['ok'],first)
+        self.assertTrue(first['unresolvedWrites'])
+        _, replay=self.run_simple("await page.fill('@field','unsafe');")
+        self.assertFalse(replay['ok'],replay)
+        self.assertEqual(replay['writesAttempted'],0)
+        _, read=self.run_simple("await page.reload(); console.log(await page.snapshot()); console.log(await page.readTarget('@field'));")
+        self.assertTrue(read['ok'],read)
+        self.assertEqual(read['writesAttempted'],0)
+
+    def test_caught_post_save_readback_failure_latches_writes(self):
+        _, result=self.run_simple("await page.fill('@field','saved'); await page.click('@save'); try { await page.snapshot() } catch(e) {} await page.fill('@field','unsafe');", SNAPSHOT_THROW='1')
+        self.assertFalse(result['ok'],result)
+        self.assertIn('MUTATION_RECONCILIATION_REQUIRED',result['error'])
+        self.assertEqual(json.loads(self.state.read_text())['value'],'saved')
+
+    def test_autosave_failure_latches_even_if_caught(self):
+        state=json.loads(self.state.read_text());state['editor']=False;self.state.write_text(json.dumps(state))
+        _, result=self.run_simple("try { await page.fill('@field','hiccup') } catch(e) {} await page.fill('@field','unsafe');")
+        self.assertFalse(result['ok'],result)
+        self.assertIn('MUTATION_RECONCILIATION_REQUIRED',result['error'])
+        self.assertEqual(json.loads(self.state.read_text())['persisted'],'hiccup')
+
+    def test_missing_markers_do_not_hide_unresolved_audit_and_operator_resolution_allows_write(self):
+        self.run_simple("await page.fill('@field','saved'); await page.click('@save');", SAVE_THROW='1')
+        for name in ('browser-write-readback-required.json','browser-mutation-uncertain.json'):
+            (self.folder/name).unlink()
+        _, result=self.run_simple("await page.fill('@field','unsafe');")
+        self.assertFalse(result['ok'],result)
+        self.assertIn('unresolved durable mutation audit',result['error'])
+        self.reconcile_as_operator()
+        self.assertFalse(mutation_outcome(self.folder)['unresolved'])
+        _, result=self.run_simple("await page.fill('@field','reviewed next change');")
+        self.assertTrue(result['ok'],result)
+
+    def test_tampered_operator_evidence_cannot_release_audit_hold(self):
+        self.run_simple("await page.fill('@field','saved'); await page.click('@save');")
+        self.reconcile_as_operator()
+        (self.folder/'operator-readback.json').write_text('{}')
+        _, result=self.run_simple("await page.fill('@field','unsafe');")
+        self.assertFalse(result['ok'],result)
+        self.assertIn('unreadable mutation evidence',result['error'])
+        _, result=self.run_simple("console.log(await page.readTarget('@field'));")
+        self.assertTrue(result['ok'],result)
+
+    def test_replay_holds_block_dynamic_writes_but_allow_reads(self):
+        (self.folder/'replay-holds.json').write_text(json.dumps({'eventKey':'test-event','holds':[
+            {'domain':'discounts_vouchers','identity':'CANARY-D01','automaticReplayPermitted':False}]}))
+        _, result=self.run_simple("const value=rr.sheets[0].populated_rows[0][0].value; await page.fill('@field',value);")
+        self.assertFalse(result['ok'],result)
+        self.assertIn('MATCH_UNCERTAIN_HUMAN_REVIEW',result['error'])
+        self.assertEqual(result['writesAttempted'],0)
+        _, result=self.run_simple("console.log(await page.snapshot());")
+        self.assertTrue(result['ok'],result)
+
+    def test_malformed_inherited_evidence_blocks_only_writes(self):
+        for name in ('browser-write-readback-required.json','browser-mutation-uncertain.json','scope-write-audit.jsonl','replay-holds.json'):
+            with self.subTest(name=name):
+                (self.folder/name).write_text('malformed')
+                _, read=self.run_simple("console.log(await page.readTarget('@field'));")
+                self.assertTrue(read['ok'],read)
+                _, write=self.run_simple("await page.fill('@field','unsafe');")
+                self.assertFalse(write['ok'],write)
+                self.assertEqual(write['writesAttempted'],0)
+                (self.folder/name).unlink()
+
+    def test_twenty_record_healthy_batch_preserves_forty_reopened_property_values(self):
+        state=json.loads(self.state.read_text())
+        state.update(records={str(i):'5' for i in range(20)},limits={str(i):'10' for i in range(20)})
+        self.state.write_text(json.dumps(state))
+        _, result=self.run_simple('''
+for(let i=0;i<20;i++) {
+  const url='https://app.cvent.com/edit?evtstub=test-event&recordId='+i;
+  await page.goto(url);
+  await page.fill('@field','10'); await page.fill('@limit','25'); await page.click('@save');
+  await page.goto(url);
+  const percentage=await page.readTarget('@field'), limit=await page.readTarget('@limit');
+  if(percentage.value!=='10'||limit.value!=='25')throw Error('Persisted mismatch');
+  console.log({code:'CANARY-D'+String(i+1).padStart(2,'0'),source:'Discounts!A'+(i+2)+':C'+(i+2),
+    requested:{percentage:'10',limit:'25'},observed:{percentage:percentage.value,limit:limit.value}});
+}
+''')
+        self.assertTrue(result['ok'],result)
+        self.assertEqual(result['saves'],20)
+        self.assertEqual(len(result['logs']),20)
+        reads=[a['result']['value'] for a in result['actions'] if a['operation']=='readTarget']
+        self.assertEqual(reads,['10','25']*20)
+        self.assertEqual(len(json.loads((self.folder/'browser-write-readback-required.json').read_text())['attempts']),20)
+        self.assertTrue(result['unresolvedWrites'])
+        self.assertFalse((self.folder/'browser-mutation-uncertain.json').exists())
 
     def test_compact_locator_reads_link_editor_and_selection_state(self):
         _, r=self.run_simple("const link=page.locator('@link'); console.log(await link.getAttribute('href')); const editor=await page.readTarget('@editor'); console.log(JSON.stringify({selectedText:editor.selectedText,html:editor.html,links:editor.links}));")
@@ -266,7 +380,7 @@ console.log(JSON.stringify({changed,verified}));
         self.assertIn('lease context',r['error'])
         self.assertEqual(r['writesAttempted'],0)
 
-    def test_real_extension_bypasses_controller_and_records_pi_verification(self):
+    def test_real_extension_preserves_unresolved_work_despite_pi_verification(self):
         p=subprocess.run(['node','tests/simple_extension.mjs'],cwd=regressions.ROOT,text=True,capture_output=True,timeout=30)
         self.assertEqual(p.returncode,0,(p.stdout+p.stderr)[-9000:])
 

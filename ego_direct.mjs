@@ -103,6 +103,7 @@ try{
   async function dispatch(step,callback){
     if(step.intent!=='write')return callback();
     if(simple){
+      assertSimpleMutationAllowed();
       const record={at:new Date().toISOString(),operation:step.operation,target:step.target,rrSource:'uploaded RR',rrSha256,eventKey:runtime.authorizedEventKey,url:(await ego.pageInfo()).url,request:{text:step.text,option:step.optionSpec??step.option,checked:step.checked,key:step.key},dataChange:!!step.dataChange,isSave:!!step.isSave,potentiallyPersisted:!!step.persistencePossible};
       if(step.dataChange||step.persistencePossible)writesAttempted++;
       if(step.persistencePossible){
@@ -112,7 +113,10 @@ try{
         appendSimpleAudit({...record,result:'attempted'});
       }else appendSimpleAudit({...record,result:'ui_action_attempted'});
       try{const value=await callback();appendSimpleAudit({...record,result:'ui_action_completed'});return value}
-      catch(error){appendSimpleAudit({...record,result:'ui_action_error',error:String(error)});throw error}
+      catch(error){
+        if(step.persistencePossible||fs.existsSync(pendingPath))latchSimpleMutation(error);
+        appendSimpleAudit({...record,result:'ui_action_error',error:String(error)});throw error;
+      }
     }
     try{const value=await callback();writesAttempted++;return value}
     catch(error){writesAttempted++;throw error}
@@ -122,6 +126,54 @@ try{
   const contextPath=path.join(path.dirname(runtimePath),'authorized-event-context.json'),transitionPath=path.join(path.dirname(runtimePath),'authorized-event-transition.json'),targetPath=path.join(path.dirname(runtimePath),'authorized-target.json');
   const privateJson=file=>{try{const stat=fs.lstatSync(file);return stat.isFile()&&!stat.isSymbolicLink()&&stat.size<1024*1024?JSON.parse(fs.readFileSync(file,'utf8')):null}catch{return null}};
   const writePrivateJson=(file,value)=>{const temporary=`${file}.${process.pid}.tmp`;fs.writeFileSync(temporary,JSON.stringify(value,null,2),{encoding:'utf8',mode:0o600,flag:'wx'});fs.renameSync(temporary,file);fs.chmodSync(file,0o600)};
+  const uncertainPath=path.join(jobPath,'browser-mutation-uncertain.json');
+  const present=file=>{try{fs.lstatSync(file);return true}catch(error){if(error.code==='ENOENT')return false;throw error}};
+  function inheritedMutationHold(){
+    // Same audit/resolution vocabulary as mutation_outcome.py. No new ledger.
+    // Missing/corrupt markers must not hide an unmatched durable attempt.
+    try{
+      if(present(pendingPath)||present(uncertainPath))return 'inherited pending/uncertain mutation';
+      const resolutionsPath=path.join(jobPath,'mutation-resolutions.json');
+      const resolutions=present(resolutionsPath)?privateJson(resolutionsPath)?.resolutions:[];
+      if(!Array.isArray(resolutions))throw Error('invalid resolutions');
+      const resolved=new Set(),root=fs.realpathSync(jobPath)+path.sep;
+      for(const resolution of resolutions){
+        const evidence=fs.realpathSync(path.resolve(jobPath,resolution.evidencePath));
+        if(resolution.actor!=='operator'||!['PERSISTED','NOT_PERSISTED'].includes(resolution.outcome)||
+           !evidence.startsWith(root)||!fs.statSync(evidence).isFile()||
+           createHash('sha256').update(fs.readFileSync(evidence)).digest('hex')!==resolution.evidenceSha256)throw Error('invalid operator evidence');
+        resolved.add(JSON.stringify([resolution.attemptAt,resolution.operation,resolution.rrSource]));
+      }
+      const auditPath=path.join(jobPath,'scope-write-audit.jsonl'),counts=new Map();
+      if(present(auditPath))for(const line of fs.readFileSync(auditPath,'utf8').split('\n').filter(line=>line.trim())){
+        const item=JSON.parse(line),key=JSON.stringify([String(item.operation??''),String(item.rrSource||'')]);
+        let delta=['attempted','failed','uncertain'].includes(item.result)?1:['succeeded','rejected_prewrite'].includes(item.result)?-1:0;
+        if(item.result==='attempted'&&resolved.has(JSON.stringify([item.at,String(item.operation??''),String(item.rrSource||'')])))delta--;
+        counts.set(key,(counts.get(key)||0)+delta);
+      }
+      if([...counts.values()].some(count=>count>0))return 'unresolved durable mutation audit';
+      return null;
+    }catch{return 'unreadable mutation evidence';}
+  }
+  const inheritedHold=simple?inheritedMutationHold():null;
+  let mutationLatched=false;
+  function latchSimpleMutation(error){
+    mutationLatched=true; // Survives a caught JS exception even if disk I/O fails.
+    if(!present(uncertainPath))writePrivateJson(uncertainPath,{executionMode:'simple',at:new Date().toISOString(),
+      browserRuntimeId:runtime.browserRuntimeId,eventKey:runtime.authorizedEventKey,
+      operation:'script',actionIndex,error:String(error).slice(-800)});
+  }
+  function assertSimpleMutationAllowed(){
+    if(inheritedHold||mutationLatched||present(uncertainPath))throw Error('MUTATION_RECONCILIATION_REQUIRED: '+(inheritedHold||'ambiguous post-dispatch failure')+'; only read-only reconciliation is permitted');
+    const holdsPath=path.join(jobPath,'replay-holds.json');
+    if(present(holdsPath)){
+      const document=privateJson(holdsPath);
+      // Dynamic scripts do not supply trustworthy object attribution. Fail
+      // closed for event holds rather than matching identities in source text.
+      if(!document||document.eventKey!==runtime.authorizedEventKey||!Array.isArray(document.holds)||document.holds.length)
+        throw Error('MATCH_UNCERTAIN_HUMAN_REVIEW: event replay holds block Simple Mode mutations; read-only inspection remains available');
+    }
+  }
   const jobEvidence=name=>{const file=path.join(jobPath,name);try{const s=fs.lstatSync(file);if(!s.isFile()||s.isSymbolicLink()||s.size>25*1024*1024)throw Error('Unsafe RR evidence artifact');return JSON.parse(fs.readFileSync(file,'utf8'))}catch(error){if(error.code==='ENOENT')return null;throw error}};
   const appendSimpleAudit=record=>fs.appendFileSync(path.join(jobPath,'scope-write-audit.jsonl'),JSON.stringify(record)+'\n',{mode:0o600});
   const targetBound=()=>{const lock=privateJson(targetPath),expected=String(runtime.authorizedEventKey||'').toLowerCase();return lock?.browser_runtime_id===runtime.browserRuntimeId&&String(lock.event_key||'').toLowerCase()===expected&&lock.name===runtime.authorizedEventName};
@@ -423,7 +475,15 @@ try{
       }
       let simpleQueue=Promise.resolve();
       const run=async(op,args={},options={})=>{
-        if(simple){const task=simpleQueue.then(()=>runSimple(op,args));simpleQueue=task.catch(()=>{});return task;}
+        if(simple){
+          const task=simpleQueue.then(()=>runSimple(op,args)).catch(error=>{
+            // Includes failed observations after a possible commit. A script's
+            // catch must not make its subsequent queued writes safe again.
+            if(present(pendingPath))latchSimpleMutation(error);
+            throw error;
+          });
+          simpleQueue=task.catch(()=>{});return task;
+        }
         if(completedActions.length>=200)throw Error('Ego round exceeded 200 actions; continue in another coherent round');
         actionIndex=completedActions.length;
         let intent=readOps.has(op)?'read':params.intent;
@@ -522,7 +582,7 @@ try{
       await new vm.Script(`(async()=>{${params.script}\n})()`).runInContext(context,{timeout:10000});
       if(simple)await simpleQueue;
       if(!simple&&dirty)throw Error('Ego round ended with changes lacking Save and fresh readback');
-      result={postSaveSnapshot,verificationPlan:planned?.steps.filter(s=>s.data),actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs:logs.filter(value=>value!==postSaveSnapshot),unresolvedWrites:false};break;
+      result={postSaveSnapshot,verificationPlan:planned?.steps.filter(s=>s.data),actions:completedActions,actionCount:completedActions.length,writesAttempted,saves,readbacks,logs:logs.filter(value=>value!==postSaveSnapshot),unresolvedWrites:simple?Boolean(inheritedHold||mutationLatched||present(pendingPath)||present(uncertainPath)):false};break;
     }
     case 'actions': {
       let saveTarget;

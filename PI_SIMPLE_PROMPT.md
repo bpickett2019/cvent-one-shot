@@ -11,7 +11,35 @@ Configure this selected EXISTING Cvent event to match the uploaded RR. This is o
 - State/log/report directory: `{{JOB_DIR}}`.
 
 ## Browser
-Read the vendored upstream `skills/ego-browser/SKILL.md`, then apply this job-facade contract where it is narrower than upstream. Use normal Ego scripts through `bash` with `ego-browser nodejs <<'JS'` (or `ego-browser <<'JS'`). The assigned browser's `page`, `taskSpace`, strict locators, snapshots, scrolling, visual controls, waits, keyboard, form controls and uploads are provided. The installed Linux helper does not provide popup waits; the observed Cvent Site Designer opens in assigned Page `p1`, so click its observed control and inspect `task.tabs()` rather than calling `page.waitForEvent("popup")`. Use `page.keyboard.press("Escape")`, not Playwright's selector/chord form `page.press("Escape", "Escape")`. No Cvent metadata header, rrSource on controls, action budget, section adapter, domain order or atomic-script shape is required.
+Use `bash` with `ego-browser nodejs <<'JS'` (or `ego-browser <<'JS'`), JavaScript, then the closing `JS` line. This is the complete restricted facade, not upstream Ego or Playwright. No `-e`, shell commands or imports. Script variables are invocation-local; the assigned Page `p1` persists. No Cvent metadata header or atomic-script shape is required.
+
+```text
+Globals: page, rr, desired, taskSpace(), console.log/warn/error, cliLog.
+page:
+  info(), url(), title(), snapshot(options?), screenshot({fullPage?}?)
+  goto(url, {waitUntil?, timeout?}?), reload(), readTarget(selector)
+  locator(selector), getByRole(role, {name: string})
+  click(target, {label?}?), dblclick(target, {label?}?)
+  fill(selector, text), focus(selector), hover(selector), press(selector, key)
+  selectOption(selector, optionSpec), setChecked(selector, boolean)
+  dragAndDrop(from, to), setInputFiles(selector, existingJobUpload)
+  waitForTimeout(ms), waitForLoadState(state?, {timeout?}?)
+  waitForSelector(selector, {timeout?, state?}?), waitForURL(stringOrRegExp, {timeout?}?)
+locator/getByRole result (no other methods or chaining):
+  click(), dblclick(), fill(text), focus(), hover(), press(key)
+  inputValue(), textContent(), innerText(), innerHTML(), getAttribute(name)
+  isChecked(), isEnabled(), isVisible()
+page.mouse: click(x,y,{clickCount?,label?}?), move(x,y), wheel(dx,dy)
+page.keyboard: press(key), type(text), insertText(text), paste(plainText), down(modifier), up(modifier)
+```
+
+Selectors may use fresh snapshot refs, observed CSS or exact role/name selectors. `getByRole` accepts a string name, not a regular expression. `innerHTML()` is limited to editable controls. `getAttribute()` accepts only href, target, rel, title, name, placeholder, aria-label, aria-expanded, aria-checked, aria-selected, role, contenteditable and type. Keyboard down/up accepts Shift, Control or Meta only. Times above are milliseconds; the bash tool's timeout is seconds (default 300, maximum 780). Screenshots return a job path to inspect with `read`.
+
+`await taskSpace()` returns the existing assignment: `page("p1")`, `userPage()`, `pages()`, `tabs()`. Its `adopt`, `waitForControl` and `finish` are compatibility shims, not ownership or job-completion operations. Use the Cvent tools below instead.
+
+Global convenience aliases also exist: pageInfo, snapshotText, captureScreenshot, readTarget, gotoAndWait, openOrReuseTab, click, doubleClick, fillInput, typeText, pressKey, selectOption, setChecked, hover, scrollBy, scroll, wait, waitForElement, dragMouse. They add no independent capabilities: `openOrReuseTab` navigates p1; `wait(seconds)` is the exception to millisecond waits; `dragMouse([from,to])` checks both endpoints. Prefer the page methods above.
+
+No evaluate, CDP, fetch, process/filesystem access, additional pages, popup/download/file-chooser waits, native-dialog handling, waitForFunction or help API is exposed. Use Cvent login handoff for human-only dialogs; do not guess unsupported methods.
 
 1. Call `cvent_login_handoff` to establish authentication. If SSO/MFA is needed it hands this same browser to the user and waits for Return to Agent. Do not reset the browser or job.
 2. Call `cvent_open_event` to open/bind the exact human-selected event. Do this once, not before every read. On a genuine runtime loss it can reconnect the same assignment.
@@ -19,7 +47,7 @@ Read the vendored upstream `skills/ego-browser/SKILL.md`, then apply this job-fa
 
 Navigate using links/refs observed on the site, not guessed Cvent URLs. A route error is not automatically an expired login: inspect the current URL/page and recover. `readTarget("@ref")` returns bounded value/text/checked state plus safe attributes, selected text, descendant links and rich-editor HTML when applicable, without raw evaluate. The same compact reads are available as `page.locator(selector).inputValue()`, `.textContent()`, `.innerText()`, `.innerHTML()` for editable controls, and `.getAttribute()` for the documented safe attribute set. Prefer compact snapshots and target reads; take screenshots only when semantic state cannot answer the question. Re-observe immediately before using refs because refs become stale after page/canvas changes. Ego stdout is returned as normal text; full output files are readable with `read` offset/limit.
 
-`bash` is browser-only, not a general operating-system shell. Do not import Playwright/CDP, use arbitrary evaluate/fetch, or access another browser. `read` supports job evidence, upstream skill/reference files and browser screenshots. Ego script globals `rr` (original sheet/cell inspection) and `desired` (optional compiled expectations) let you inspect/extract RR data using ordinary JavaScript and console.log without extra file tools. `page.setInputFiles` accepts only existing files under this job's `uploads/` directory.
+`read` supports job evidence and browser screenshots, not upstream Ego API documentation. Ego script globals `rr` (original sheet/cell inspection) and `desired` (optional compiled expectations) let you inspect/extract RR data using ordinary JavaScript and console.log without extra file tools. `page.setInputFiles` accepts only existing files under this job's `uploads/` directory.
 
 ## Token-efficient execution
 - Inventory every sheet once and retain a compact checklist with exact sheet/cell references. Use `rr` to extract only the cells/properties needed for the current work; do not print entire workbook objects or repeatedly reload both literal evidence and duplicate compiled plans. Never omit requirements to save tokens.
@@ -43,9 +71,9 @@ This job's compiled coverage floor (still inspect the original RR for anything t
 ## Recovery and evidence
 - You handle stale refs, missing controls, modals, navigation errors and ordinary browser problems: re-observe, use another locator or visual interaction, recover and continue. Do not repeat an inspection-only loop. After three target-resolution failures on one exact item, record that item for review and move to another independent item/domain instead of spending the mission on one canvas control. No adapter is required.
 - A changed input is not automatically a persisted write. If an error occurs before Save, inspect the current editor and recover. After Save/autosave, inspect the persisted result; if necessary reopen read-only. A snapshot is evidence to examine, not proof by itself that the desired value was saved.
-- Do not blindly replay a possibly persisted operation. Read back first. Hold only an unresolved item and continue independent safe items/sections. Report real job-wide failures only for loss of authentication, ownership/lease, inability to identify the target, inaccessible runtime, or genuine unreconcilable persisted uncertainty.
-- Save your own progress with `cvent_job_update`; keep UI logs informative. Its optional `verification` text records your actual determination after persisted readback (not just 'Save clicked'); final `realReads` can record it too. Preserve completed work across handoff/continuation. Determine your own checklist/order from the whole RR, not a controller's domain list. Keep every safe unfinished item/domain in `pending`; `cvent_finish` is blocked until your pending checklist is empty. If you cannot configure one exact item after real attempts, record why and continue the rest.
+- Do not blindly replay a possibly persisted operation. Read back first. Retain exact unresolved items. If the mutation gate is held, continue only read-only inspection until operator reconciliation; do not try unrelated writes to bypass it. Report real job-wide failures only for loss of authentication, ownership/lease, inability to identify the target, inaccessible runtime, or genuine unreconcilable persisted uncertainty.
+- Save your own progress with `cvent_job_update`; keep UI logs informative. `verification` and final `realReads` are assessments, not authority to clear pending mutations. Preserve per-record RR references, requested values and reopened observed values in printed output and targeted readback artifacts for independent review. A coherent batch may contain multiple successful Saves, but pending attempts at its end require evidence-backed operator reconciliation before another writing invocation or completion. Do not retry acknowledgment or writes: inspect read-only as needed, retain pending work, and report INCOMPLETE with `uncertain_mutation` when reconciliation is required. Preserve completed work across handoff/continuation. Determine your own checklist/order from the whole RR, not a controller's domain list. Keep every safe unfinished item/domain in `pending`; `cvent_finish` is blocked until your pending checklist is empty. If you cannot configure one exact item after real attempts, record why and continue the rest.
 - On final QA call `cvent_finish` with actual writes, readback evidence, exact unresolved items, one evidence-backed assessment for every populated RR domain (including your additional domains), and guardrail counts. Each assessment must explicitly report `allSafeWorkAttempted`: true only after every independent permissible requirement in that domain was attempted; false if anything remains untouched or deferred. This is your evidence-backed assessment, not permission to mark an unfinished domain complete. Use DRAFT_COMPLETE only when all requested permissible work is verified; REVIEW_REQUIRED when every independent domain has been attempted but individual items need a human; INCOMPLETE only for a genuine mission-wide blocker. Never claim full completion from a few sections, object counts, or a successful Save alone.
 
-Existing exact-object replay holds (do not mutate these objects; continue unrelated safe work):
+Existing replay holds (Simple Mode conservatively blocks writes while any event hold remains; inspection is available):
 {{REPLAY_HOLDS}}

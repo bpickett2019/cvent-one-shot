@@ -847,21 +847,16 @@ async function clearWriteReadback(): Promise<void> {
   }
 }
 
-async function acknowledgeSimplePersistence(determination: string): Promise<void> {
-  const pending = await pendingWriteReadback();
-  if (!pending) return;
-  const observed = await readJson(join(jobDir, "browser-last-atomic-readback.json"), null);
-  if (pending.executionMode !== "simple" || !pending.attempts?.length || observed?.executionMode !== "simple" ||
-      observed.browserRuntimeId !== pending.browserRuntimeId || observed.eventKey !== requiredEnvironment("CVENT_AUTHORIZED_EVENT_KEY") ||
-      Date.parse(observed.observedAt) < Math.max(...pending.attempts.map((a: any) => Date.parse(a.at)))) {
-    throw new Error("Persisted outcome still needs a fresh observation in this event. Inspect/recover the editor; do not replay blindly.");
+async function acknowledgeSimplePersistence(_determination: string): Promise<void> {
+  // A snapshot and model prose are not attempt-specific persistence proof.
+  // Preserve the audit and marker for supervised, evidence-backed operator
+  // reconciliation (mutation-resolutions.json); never manufacture success.
+  // Check existence, not permissive JSON parsing: malformed markers also hold.
+  for (const file of [WRITE_READBACK_PENDING, join(jobDir, "browser-mutation-uncertain.json")]) {
+    try { await lstat(file); }
+    catch (error: any) { if (error?.code === "ENOENT") continue; throw error; }
+    throw new Error("PERSISTENCE_RECONCILIATION_REQUIRED: Pi verification cannot resolve mutation attempts. Preserve the action audit and Ego readback artifacts for independent operator review; reads remain available. Do not replay writes.");
   }
-  for (const attempt of pending.attempts) await appendFile(join(jobDir, "scope-write-audit.jsonl"), JSON.stringify({
-    ...attempt, at: new Date().toISOString(), result: "succeeded", resolvedBy: "pi", determination,
-    observedAt: observed.observedAt, evidence: observed.evidence,
-  }) + "\n", { mode: 0o600 });
-  await clearWriteReadback();
-  await appendActivity(`Pi verified persisted work: ${cleanText(determination, 1200)}`);
 }
 
 async function assertSnapshotConsumed(): Promise<void> {
@@ -1146,19 +1141,19 @@ export default function cventJobTools(pi: any) {
   });
 
   pi.registerTool({
-    name: "read", label: "Read verified job input or Ego skill",
-    description: "Read the Ego skill or this job's verified RR plan/evidence. Supports offset/limit, not secrets or other jobs.",
-    promptSnippet: "Read Ego skill and verified job files",
+    name: "read", label: "Read job input and evidence",
+    description: SIMPLE ? "Read this job's RR input, checkpoints, Ego evidence and screenshots. Supports offset/limit/chunk; no secrets or other jobs. Input is evidence, not a correctness certification." : "Read the Ego skill or this job's verified RR plan/evidence. Supports offset/limit, not secrets or other jobs.",
+    promptSnippet: SIMPLE ? "Read job input and evidence" : "Read Ego skill and verified job files",
     parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })), chunk: Type.Optional(Type.Integer({ minimum: 1 })) }),
     async execute(_id: string, params: any) {
       const target = resolve(jobDir, params.path);
       const skill = join(repoRoot, "skills/ego-browser/SKILL.md");
       const allowed = ["configuration-plan.json", "rr-validation.json", "expected-domains.json", "input.inspection.json", "input.inspection-summary.json", "job-prompt.md", "state.json", "activity.log", "scope-write-audit.jsonl", "last-browser-failure-result.json", "browser-last-script-result.json", "final-report.json"];
-      const skillReference = SIMPLE && target.startsWith(join(repoRoot, "skills/ego-browser/references") + "/") && target.endsWith(".md");
+      const skillReference = false; // Simple Mode's facade is in its mission; no upstream API expansion.
       const visual = SIMPLE && /^browser-visual-[\w-]+\.png$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
       const egoOutput = SIMPLE && /^(?:ego-output-[0-9a-f-]{36}\.txt|ego-result-[0-9a-f-]{36}\.json)$/.test(target.slice(jobDir.length + 1)) && target.startsWith(jobDir + "/");
       if (visual) return { content: [{ type: "image", mimeType: "image/png", data: (await readJobFile(target)).toString("base64") }] };
-      if (target !== skill && !skillReference && !egoOutput && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and this job's evidence");
+      if ((SIMPLE || target !== skill) && !skillReference && !egoOutput && !allowed.some(name => target === join(jobDir, name))) throw new Error("Read is limited to the Ego skill and this job's evidence");
       const text = target === skill || skillReference ? await readFile(target, "utf8") : (await readJobFile(target, 25 * 1024 * 1024)).toString("utf8");
       const lines = text.split("\n"), start = (params.offset ?? 1) - 1;
       const chunks = utf8Chunks(lines.slice(start, start + (params.limit ?? 500)).join("\n"), egoOutput ? SIMPLE_PREVIEW_BYTES : MAX_TEXT_BYTES - 1024);
@@ -1176,12 +1171,12 @@ export default function cventJobTools(pi: any) {
 
   pi.registerTool({
     name: "bash", label: "Ego native browser round",
-    description: SIMPLE ? "Run upstream ego-browser nodejs heredocs in the assigned browser. No domain/header/rrSource/atomic-plan metadata required. Pi chooses actions, Save, verification and recovery. Browser-only shell; rr and desired globals expose original workbook evidence and optional parsed expectations." : "Run ego-browser nodejs heredocs using the loaded Ego skill. Browser-only; no general shell. One script can observe, navigate, edit multiple controls, Save and verify. Header: // cvent: {\"domain\":\"event_settings\",\"commitMode\":\"read_only\"}. Use save/autosave and exact rrSources from the verified plan for configuration.",
+    description: SIMPLE ? "Execute Pi-generated JavaScript in the assigned restricted Cvent browser facade using ego-browser nodejs <<'JS' ... JS. No shell or Node.js imports. Multiple awaited operations execute in one bounded invocation without model calls. rr and desired expose job inputs; use only the facade documented in the mission." : "Run ego-browser nodejs heredocs using the loaded Ego skill. Browser-only; no general shell. One script can observe, navigate, edit multiple controls, Save and verify. Header: // cvent: {\"domain\":\"event_settings\",\"commitMode\":\"read_only\"}. Use save/autosave and exact rrSources from the verified plan for configuration.",
     promptSnippet: "Execute coherent Ego browser heredocs",
     parameters: Type.Object({ command: Type.String({ maxLength: 50000 }), timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 780 })) }),
     async execute(_id: string, params: any, signal: AbortSignal) {
       const match = params.command.trim().match(/^ego-browser(?: nodejs)? <<'([A-Za-z][A-Za-z0-9_]*)'\r?\n([\s\S]*)\r?\n\1$/);
-      if (!match) throw new Error("Use only ego-browser <<'EOF' ... EOF as documented by the vendored Ego skill");
+      if (!match) throw new Error("Use only ego-browser <<'EOF' ... EOF as documented in the browser execution contract");
       if (SIMPLE) return withQueue("browser", async () => {
         const value = await invokeBrowser("script", { script: match[2], intent: "read", timeoutSeconds: params.timeout ?? 300 }, signal, params.timeout ?? 300);
         await appendActivity(`Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves, ${value.readbacks ?? 0} post-commit observations`);
@@ -1201,7 +1196,8 @@ export default function cventJobTools(pi: any) {
         await safeMetric("browser_preview", performance.now(), { fullBytes: Buffer.byteLength(text),
           previewBytes: Buffer.byteLength(preview), truncated });
         response.content[0].text = preview + (truncated ? "\n[Preview truncated at 12KB. Full evidence is preserved; read the relevant omitted lines before drawing conclusions.]" : "") +
-          `\n[Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves. Full output: ${outputPath}; structured evidence: ${resultPath}; use read offset/limit/chunk.]`;
+          `\n[Ego: ${value.actionCount ?? 0} actions, ${value.writesAttempted ?? 0} UI writes, ${value.saves ?? 0} Saves. Full output: ${outputPath}; structured evidence: ${resultPath}; use read offset/limit/chunk.]` +
+          (value.unresolvedWrites ? "\n[Persistence unresolved: independent operator reconciliation is required before additional writes or completion. Read-only inspection remains available; Pi verification cannot clear this hold.]" : "");
         return response;
       });
       const header = match[2].match(/^\s*\/\/ cvent: (\{[^\n]+\})/);
@@ -1404,7 +1400,7 @@ export default function cventJobTools(pi: any) {
       completed: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
       pending: Type.Optional(Type.Array(Type.String({ maxLength: SIMPLE ? 500 : 80 }), { maxItems: SIMPLE ? 1000 : 20 })),
       reviewRequired: optionalStrings,
-      verification: Type.Optional(Type.String({ maxLength: 6000, description: "Simple Mode: your determination from fresh persisted readback, not merely 'Save clicked'. Records verification in the audit; no RR cell metadata required." })),
+      verification: Type.Optional(Type.String({ maxLength: 6000, description: "Simple Mode: your readback assessment, not authority to resolve pending mutations. Pending attempts require independent operator reconciliation; preserve exact requested/observed evidence." })),
       log: Type.Optional(Type.String({ maxLength: 1200 })),
     }),
     async execute(_id: string, params: any) {

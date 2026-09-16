@@ -1,6 +1,6 @@
 /** Test-only preload: intercept ALL fetches; never permit actual networking. */
 import { spawnSync } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const scenario = process.env.OFFLINE_SCENARIO;
 let count = 0;
@@ -22,6 +22,7 @@ globalThis.fetch = async (input, options = {}) => {
   count++;
   appendFileSync(events, JSON.stringify({ kind: 'provider', count })+'\n');
   const request = JSON.parse(options.body);
+  if(count===1)writeFileSync(join(process.env.CVENT_JOB_DIR,'offline-contract.json'),JSON.stringify({system:request.system,tools:request.tools}));
   const summary = !request.tools?.length;
   let block = { type: 'text', text: summary ? '## Progress\nVerified fixture read. Continue remaining work.' : 'Offline fixture finished.' };
   if (scenario === 'failures') {

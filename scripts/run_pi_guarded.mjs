@@ -71,7 +71,8 @@ try {
     const services = await sdk.createAgentSessionServices({ cwd, agentDir, modelRuntime: runtime, settingsManager,
       resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
         additionalExtensionPaths: [join(repo, 'extensions/cvent-job-tools.ts')],
-        additionalSkillPaths: [join(repo, 'skills/ego-browser/SKILL.md')] } });
+        systemPromptOverride: () => readFileSync(join(repo, 'PI_SIMPLE_SYSTEM_PROMPT.md'), 'utf8'),
+        appendSystemPromptOverride: () => [] } });
     const loaded = services.resourceLoader.getExtensions();
     if (loaded.errors.length || loaded.extensions.length !== 1) throw new Error('Required capability extension failed');
     stage = 'SESSION';

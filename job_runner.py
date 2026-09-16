@@ -729,7 +729,9 @@ class JobRunner:
             "pi", "-p", "--mode", "json", "--approve", "--provider", pi_provider(), "--model", pi_model(),
             "--thinking", os.environ.get("CVENT_PI_THINKING", "high"),
             "--no-extensions", "--extension", str(ROOT / "extensions/cvent-job-tools.ts"),
-            "--no-skills", "--skill", str(ROOT / "skills/ego-browser/SKILL.md"),
+            "--no-skills",
+            *(["--system-prompt", str(ROOT / "PI_SIMPLE_SYSTEM_PROMPT.md")] if os.environ.get('CVENT_EXECUTION_MODE') == 'simple'
+              else ["--skill", str(ROOT / "skills/ego-browser/SKILL.md")]),
             "--no-prompt-templates", "--no-context-files", "--no-builtin-tools",
             "--tools", capability_tools,
             "--session-dir", str(sessions), "--name", f"cvent-{job['id']}",
