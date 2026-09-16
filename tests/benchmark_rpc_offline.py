@@ -26,6 +26,17 @@ if payload['operation'] == 'reserve' and payload['data'].get('purpose') == 'comp
     if os.environ.get('OFFLINE_SCENARIO') == 'compaction_auth':
         BrowserGate(server.directory_for(job)).update({'authWaiting': True})
 response = server.model_benchmark_request(request, payload)
+# Every real controller RPC in this fake-transport harness runs in a fresh process.
+# Check the existing meter after admission, dispatch, settlement, denial and errors.
+from benchmark_cost import BenchmarkCost
+from benchmark_assertions import assert_meter_consistent
+view = assert_meter_consistent(BenchmarkCost(server.store), job, server.directory_for)
+with (server.directory_for(job) / 'offline-meter-checks.jsonl').open('a') as evidence:
+    evidence.write(json.dumps({'operation': payload['operation'],
+        'physical_requests': view['physical_requests'], 'responses': view['responses'],
+        'cost_micro': view['estimated_model_consumption_micro'],
+        'exposure_micro': view['unresolved_exposure_upper_micro'],
+        'accounting_complete': view['accounting_complete']}) + '\n')
 if hasattr(response, 'body'):
     print(json.dumps({'status': response.status_code, 'body': json.loads(response.body)}))
 else:

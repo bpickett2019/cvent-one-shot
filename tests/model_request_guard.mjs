@@ -203,6 +203,13 @@ try {
     runtime.streamSimple.bind(runtime), { enabled: false, maxRetries: 0 });
   assert.equal(blocked.stopReason, 'error');
   assert.equal(actualRequests, 2);
+  // Explicit subsequent/retry attempts under USER ownership must also stop
+  // before fetch, not merely the native compaction attempt above.
+  for (let retry = 0; retry < 3; retry++) {
+    const denied = await runtime.completeSimple(actualModel, context, { reasoning: 'high', maxTokens: 128 });
+    assert.equal(denied.stopReason, 'error');
+  }
+  assert.equal(actualRequests, 2, 'USER ownership must block every retry before fetch');
   f.config.admission.reserve = async () => { throw Object.assign(new Error('auth wait'), { code: 'MODEL_PAUSED_AUTH' }); };
   for (let retry = 0; retry < 3; retry++) {
     const denied = await runtime.completeSimple(actualModel, context, { reasoning: 'high', maxTokens: 128 });

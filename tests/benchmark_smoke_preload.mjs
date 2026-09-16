@@ -30,6 +30,17 @@ globalThis.fetch = async (url, init) => {
     ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } }],
     ['message_stop', { type: 'message_stop' }],
   ];
+  if (mode === 'usage_categories') {
+    Object.assign(events[0][1].message.usage, {cache_read_input_tokens: 20, cache_creation_input_tokens: 30});
+    events.find(([name]) => name === 'message_delta')[1].usage = {
+      output_tokens: 4, output_tokens_details: {thinking_tokens: 2},
+    };
+  }
+  if (mode.startsWith('malformed_')) {
+    const usage = events.find(([name]) => name === 'message_delta')[1].usage;
+    usage.output_tokens = {malformed_negative: -1, malformed_fraction: 1.5,
+      malformed_string: '1', malformed_null: null}[mode];
+  }
   if (mode === 'truncated') events.pop();
   if (mode === 'missing_usage') delete events.find(([name]) => name === 'message_delta')[1].usage;
   if (mode === 'sse_error') events.splice(1, events.length, ['error', { type: 'error',

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkLauncherTests(unittest.TestCase):
-    def launch(self, scenario, *, paused=False):
+    def launch(self, scenario, *, paused=False, resume=False):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
             store = ControlStore(root/'control.db', lease_seconds=3600)
@@ -46,7 +46,24 @@ class BenchmarkLauncherTests(unittest.TestCase):
             completed = subprocess.run(['node', '--import', str(ROOT/'tests/benchmark_preload.mjs'),
                 str(ROOT/'scripts/run_pi_guarded.mjs'), '--job', 'Offline fixture. Never operate a browser.'],
                 cwd=directory, env=env, text=True, capture_output=True, timeout=120)
+            if resume:
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                before = costs.snapshot(job['id'])
+                sessions = list((directory/'pi-sessions').glob('*.jsonl'))
+                self.assertEqual(len(sessions), 1)
+                env['CVENT_MODEL_EXECUTION_ID'] = 'execution_resumed'
+                completed = subprocess.run(['node', '--import', str(ROOT/'tests/benchmark_preload.mjs'),
+                    str(ROOT/'scripts/run_pi_guarded.mjs'), '--job', '--session', str(sessions[0]),
+                    'Offline continuation only. No browser.'], cwd=directory, env=env,
+                    text=True, capture_output=True, timeout=120)
+                self.assertEqual(costs.snapshot(job['id'])['logical_build_id'], before['logical_build_id'])
+                self.assertEqual(costs.snapshot(job['id'])['cumulative_cost_micro'], before['cumulative_cost_micro'] + 45)
             snapshot = costs.snapshot(job['id'])
+            checks = [json.loads(line) for line in (directory/'offline-meter-checks.jsonl').read_text().splitlines()]
+            self.assertTrue(checks)
+            self.assertEqual([r['cost_micro'] for r in checks], sorted(r['cost_micro'] for r in checks))
+            self.assertEqual(checks[-1]['cost_micro'], snapshot['cumulative_cost_micro'])
+            self.assertEqual(checks[-1]['physical_requests'], snapshot['physical_attempts'])
             trace_path = directory/'offline-network.jsonl'
             trace = [json.loads(l) for l in trace_path.read_text().splitlines()] if trace_path.exists() else []
             markers = list(directory.glob('model-admission-stop-*.json'))
@@ -61,6 +78,17 @@ class BenchmarkLauncherTests(unittest.TestCase):
         self.assertTrue(snapshot['accounting_complete'])
         self.assertFalse(stopped)
         self.assertEqual([r['operation'] for r in trace if r['kind'] == 'controller'], ['register', 'reserve', 'dispatch', 'settle'])
+
+    def test_actual_launcher_resume_in_new_process_keeps_previous_consumption(self):
+        completed, snapshot, trace, stopped = self.launch('normal', resume=True)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertEqual(snapshot['physical_attempts'], 2)
+        self.assertEqual(snapshot['cumulative_cost_micro'], 90)
+        self.assertEqual(len(snapshot['executions']), 2)
+        self.assertEqual(len({e['session_id'] for e in snapshot['executions']}), 1)
+        self.assertEqual(sum(r['kind'] == 'provider' for r in trace), 2)
+        self.assertTrue(snapshot['accounting_complete'])
+        self.assertFalse(stopped)
 
     def test_actual_launcher_user_pause_makes_zero_provider_calls(self):
         completed, snapshot, trace, stopped = self.launch('normal', paused=True)

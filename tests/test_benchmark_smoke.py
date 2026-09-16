@@ -33,6 +33,12 @@ class SmokeHarnessTests(unittest.TestCase):
             from control_store import ControlStore
             reopened = BenchmarkCost(ControlStore(output / 'control.db', lease_seconds=300))
             self.assertEqual(reopened.snapshot(evidence['meter']['job_id']), evidence['cost'])
+            from benchmark_assertions import assert_meter_consistent
+            view = assert_meter_consistent(reopened, reopened.store.get_job(evidence['meter']['job_id']), lambda _: output/'job')
+            for field in ('tokens', 'physical_requests', 'responses', 'accounting_complete',
+                          'estimated_model_consumption_micro', 'remaining_authorization_micro',
+                          'unresolved_exposure_upper_micro', 'outstanding_requests'):
+                self.assertEqual(view[field], evidence['meter'][field])
             return result, evidence
 
     def test_entire_diagnostic_with_fake_transport_and_real_sqlite(self):
@@ -45,6 +51,25 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertIn('BUILD_ALLOWANCE_HEADROOM', json.dumps(evidence['trace']))
         self.assertEqual(evidence['result']['transport'], [dict(
             attempt=1, httpStatus=200, responseFormat='sse', transportError=None)])
+
+    def test_cache_and_reasoning_usage_use_existing_accounting_and_meter(self):
+        result, evidence = self.run_offline('usage_categories')
+        self.assertEqual(result, 0)
+        self.assertEqual(evidence['cost']['tokens'], dict(input=10, output=4, cacheRead=20, cacheWrite=30, totalTokens=64))
+        # Two reasoning tokens are a subset of four output tokens, never added twice.
+        self.assertEqual(evidence['cost']['cumulative_cost_micro'], 209)
+        self.assertEqual(evidence['meter']['estimated_model_consumption_micro'], 209)
+        self.assertTrue(evidence['persistence_verified'])
+        self.assertTrue(evidence['result']['secondBlocked'])
+
+    def test_malformed_usage_never_settles_or_retries(self):
+        for mode in ('malformed_negative', 'malformed_fraction', 'malformed_string', 'malformed_null'):
+            with self.subTest(mode=mode):
+                result, evidence = self.run_offline(mode)
+                self.assertEqual(result, 1)
+                self.assert_unknown(evidence)
+                self.assertEqual(evidence['meter']['responses'], 0)
+                self.assertFalse(evidence['meter']['accounting_complete'])
 
     def assert_unknown(self, evidence):
         self.assertFalse(evidence['passed'])
