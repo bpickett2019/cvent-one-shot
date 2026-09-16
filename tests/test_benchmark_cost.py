@@ -162,6 +162,34 @@ class BenchmarkCostTests(unittest.TestCase):
         (other_dir/'input.xlsx').write_bytes(b'changed')
         with self.assertRaisesRegex(BenchmarkDenied, 'BINDING_CHANGED'): self.costs.bind(other, other_dir)
 
+    def test_unrelated_build_does_not_inherit_unknown_exposure(self):
+        self.reserve('old_unknown', upper=3_751_920); self.dispatch('old_unknown')
+        self.costs.terminal('execution_one', 'old_unknown', 'UNKNOWN')
+        original = self.costs.snapshot(self.job['id'])
+        other = self.store.create_job(self.owner,
+            SimpleNamespace(event_id='unrelated_canary', event_key='unrelated_canary', name='No Cvent canary'), 'fake.txt')
+        directory = self.root/'unrelated-canary'; directory.mkdir()
+        (directory/'input.xlsx').write_bytes(b'distinct offline binding, not a Cvent workbook')
+        build = self.costs.bind(other, directory)
+        self.assertNotEqual(build, self.build_id)
+        view = self.costs.snapshot(other['id'])
+        self.assertEqual(view['cumulative_cost_micro'], 0)
+        self.assertEqual(view['unresolved_exposure_upper_micro'], 0)
+        self.assertEqual(view['requests'], [])
+        self.assertEqual(view['outstanding_requests'], [])
+        self.assertTrue(view['accounting_complete'])
+        from benchmark_assertions import assert_meter_consistent
+        projected = assert_meter_consistent(self.costs, other, lambda _: directory)
+        self.assertEqual(projected['unresolved_exposure_upper_micro'], 0)
+        self.assertEqual(projected['remaining_authorization_micro'], view['allowance_micro'])
+        # This separate database-wide serialization veto is NOT cost inheritance.
+        # Keep it intact: no unrelated-build accounting fix is needed.
+        with self.assertRaisesRegex(BenchmarkDenied, 'OUTSTANDING_USAGE'):
+            self.costs.register_execution(other['id'], 'canary_execution', 'canary_session', 'a'*40)
+        self.assertEqual(self.costs.snapshot(self.job['id']), original)
+        self.assertIsNone(original['requests'][0]['cost_micro'])
+        self.assertEqual(original['unresolved_exposure_upper_micro'], 3_751_920)
+
     def test_another_workspace_cannot_attach_to_or_reset_the_build(self):
         owner = self.store.ensure_user('other-owner', 'other@example.invalid', 'Other', False)
         job = self.store.create_job(owner, self.event, 'RR.xlsx')
