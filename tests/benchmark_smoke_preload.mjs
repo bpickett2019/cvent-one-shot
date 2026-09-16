@@ -7,7 +7,7 @@ globalThis.fetch = async (url, init) => {
   assert.equal(String(url), 'https://api.anthropic.com/v1/messages');
   assert.equal(init.redirect, 'error');
   const payload = JSON.parse(init.body);
-  assert.equal(payload.model, 'claude-sonnet-4-6');
+  assert.equal(payload.model, 'claude-sonnet-5');
   assert.equal(payload.max_tokens, 128);
   assert.equal(payload.stream, true);
   assert.equal(payload.thinking.type, 'adaptive');
@@ -23,7 +23,7 @@ globalThis.fetch = async (url, init) => {
   if (mode === 'timeout') throw new DOMException(privateSentinel, 'TimeoutError');
   if (mode === 'no_body') return new Response(null, { status: 200 });
   const events = [
-    ['message_start', { type: 'message_start', message: { id: 'offline', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 0 } } }],
+    ['message_start', { type: 'message_start', message: { id: 'offline', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 0 } } }],
     ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
     ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'OK' } }],
     ['content_block_stop', { type: 'content_block_stop', index: 0 }],

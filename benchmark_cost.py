@@ -20,11 +20,11 @@ from control_store import iso
 from model_failures import normalize_blocker
 
 PROVIDER = "anthropic"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 PI_VERSION = "0.84.4"
-PRICING = "sonnet-4-6-sdk-0.84.4-standard-5m-v1"
-RATES = {"input": Decimal("3"), "cacheRead": Decimal("0.3"),
-         "cacheWrite": Decimal("3.75"), "output": Decimal("15")}
+PRICING = "sonnet-5-sdk-0.84.4-standard-5m-v1"
+RATES = {"input": Decimal("2"), "cacheRead": Decimal("0.2"),
+         "cacheWrite": Decimal("2.5"), "output": Decimal("10")}
 INITIAL_ALLOWANCE = 50_000_000
 FAILURE_BOUND = 3
 

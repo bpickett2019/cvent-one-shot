@@ -45,7 +45,7 @@ class SmokeHarnessTests(unittest.TestCase):
         result, evidence = self.run_offline()
         self.assertEqual(result, 0)
         self.assertTrue(evidence['passed'])
-        self.assertEqual(evidence['cost']['cumulative_cost_micro'], 45)
+        self.assertEqual(evidence['cost']['cumulative_cost_micro'], 30)
         self.assertTrue(evidence['result']['secondBlocked'])
         self.assertTrue(evidence['persistence_verified'])
         self.assertIn('BUILD_ALLOWANCE_HEADROOM', json.dumps(evidence['trace']))
@@ -57,8 +57,8 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(evidence['cost']['tokens'], dict(input=10, output=4, cacheRead=20, cacheWrite=30, totalTokens=64))
         # Two reasoning tokens are a subset of four output tokens, never added twice.
-        self.assertEqual(evidence['cost']['cumulative_cost_micro'], 209)
-        self.assertEqual(evidence['meter']['estimated_model_consumption_micro'], 209)
+        self.assertEqual(evidence['cost']['cumulative_cost_micro'], 139)
+        self.assertEqual(evidence['meter']['estimated_model_consumption_micro'], 139)
         self.assertTrue(evidence['persistence_verified'])
         self.assertTrue(evidence['result']['secondBlocked'])
 
@@ -76,7 +76,7 @@ class SmokeHarnessTests(unittest.TestCase):
         self.assertFalse(evidence['cost']['accounting_complete'])
         self.assertEqual(evidence['cost']['requests'][0]['state'], 'UNKNOWN')
         self.assertIsNone(evidence['cost']['requests'][0]['cost_micro'])
-        self.assertEqual(evidence['cost']['unresolved_exposure_upper_micro'], 3751920)
+        self.assertEqual(evidence['cost']['unresolved_exposure_upper_micro'], 2501280)
         self.assertNotIn('reopen_and_reduce_test_allowance', json.dumps(evidence['trace']))
 
     def test_http_errors_reproduce_unknown_without_retry_and_keep_safe_status(self):

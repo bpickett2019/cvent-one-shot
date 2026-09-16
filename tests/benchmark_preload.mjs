@@ -22,7 +22,7 @@ globalThis.fetch = async (input, options = {}) => {
   count++;
   appendFileSync(events, JSON.stringify({ kind: 'provider', count })+'\n');
   const request = JSON.parse(options.body);
-  if(count===1)writeFileSync(join(process.env.CVENT_JOB_DIR,'offline-contract.json'),JSON.stringify({system:request.system,tools:request.tools}));
+  if(count===1)writeFileSync(join(process.env.CVENT_JOB_DIR,'offline-contract.json'),JSON.stringify({system:request.system,tools:request.tools,model:request.model,thinking:request.thinking,output_config:request.output_config}));
   const summary = !request.tools?.length;
   let block = { type: 'text', text: summary ? '## Progress\nVerified fixture read. Continue remaining work.' : 'Offline fixture finished.' };
   if (scenario === 'failures') {

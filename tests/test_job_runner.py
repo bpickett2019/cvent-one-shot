@@ -31,7 +31,7 @@ class JobRunnerConfigurationTests(unittest.TestCase):
     def test_pi_command_is_explicit_anthropic_and_never_contains_key(self):
         command = self.runner.pi_command(self.job, self.directory, {}, "job prompt")
         self.assertEqual(command[command.index("--provider") + 1], "anthropic")
-        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-4-6")
+        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5")
         self.assertNotIn("--api-key", command)
         self.assertNotIn("ANTHROPIC_API_KEY", " ".join(command))
         self.assertIn("--no-builtin-tools", command)

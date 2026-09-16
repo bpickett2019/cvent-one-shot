@@ -63,7 +63,7 @@ class BenchmarkTortureTests(unittest.TestCase):
                 with self.subTest(change=change, purpose=purpose):
                     f.gate.write({**baseline, **change})
                     self.denied('PAUSED_', purpose)
-                    self.assertEqual(self.previous_cost, 1050)
+                    self.assertEqual(self.previous_cost, 700)
         f.gate.write(baseline)
         (f.directory/'state.json').write_text('{"status":"login_required"}')
         for purpose in ('configuration', 'retry', 'compaction'):
@@ -81,7 +81,7 @@ class BenchmarkTortureTests(unittest.TestCase):
         self.assertEqual(self.provider.call_count, before_calls)
         f.costs.terminal('execution_one', 'waiting', 'CANCELLED')
         view = self.observe()
-        self.assertEqual(view['estimated_model_consumption_micro'], 1050)
+        self.assertEqual(view['estimated_model_consumption_micro'], 700)
         self.assertEqual(view['unresolved_exposure_upper_micro'], 0)
         self.assertEqual(view['physical_requests'], 1)
 
@@ -99,7 +99,7 @@ class BenchmarkTortureTests(unittest.TestCase):
                 self.observe()
         f.costs.terminal('execution_one', 'bad', 'UNKNOWN')
         view = self.observe()
-        self.assertEqual(view['estimated_model_consumption_micro'], 1050)
+        self.assertEqual(view['estimated_model_consumption_micro'], 700)
         self.assertEqual(view['unresolved_exposure_upper_micro'], 6_000_000)
         self.assertFalse(view['accounting_complete'])
         self.denied('OUTSTANDING_USAGE')
@@ -108,7 +108,7 @@ class BenchmarkTortureTests(unittest.TestCase):
         f.costs.approve(f.job['id'], actor='offline-operator', is_admin=True,
                         allowance_micro=60_000_000, reason='Synthetic approval, never a real allowance change')
         self.denied('OUTSTANDING_USAGE')
-        self.assertEqual(self.observe()['estimated_model_consumption_micro'], 1050)
+        self.assertEqual(self.observe()['estimated_model_consumption_micro'], 700)
 
     def test_abrupt_process_exits_preserve_pending_dispatched_unknown_and_spend(self):
         f = self.f
@@ -140,7 +140,7 @@ os._exit(23)  # No orderly worker cleanup, receipt or cancellation.
                 self.assertEqual(child.returncode, 23, child.stderr)
                 f.store = ControlStore(f.store.path); f.costs = BenchmarkCost(f.store)
                 view = self.observe()
-                self.assertEqual(view['estimated_model_consumption_micro'], 1050)
+                self.assertEqual(view['estimated_model_consumption_micro'], 700)
                 self.assertEqual(view['unresolved_exposure_upper_micro'], 6_000_000)
                 self.assertFalse(view['accounting_complete'])
                 row = f.costs.snapshot(f.job['id'])['requests'][-1]
@@ -167,15 +167,15 @@ os._exit(23)  # No orderly worker cleanup, receipt or cancellation.
         for purpose in ('configuration', 'retry', 'compaction'):
             self.denied('BLOCKER_CONTROL_NOT_FOUND', purpose)
         self.assertEqual(self.provider.call_count, 3)
-        self.assertEqual(self.previous_cost, 3150)
+        self.assertEqual(self.previous_cost, 2100)
 
     def test_exhaustion_then_explicit_increase_never_resets_accounting(self):
         # Small authorization only in an isolated fake fixture. Production untouched.
-        with patch('benchmark_cost.INITIAL_ALLOWANCE', 1050):
+        with patch('benchmark_cost.INITIAL_ALLOWANCE', 700):
             self.f = fixture.BenchmarkCostTests(); self.f.setUp()
         f = self.f
         self.addCleanup(f.doCleanups)
-        f.reserve('first', upper=1050); self.observe()
+        f.reserve('first', upper=700); self.observe()
         f.dispatch('first'); self.provider(); f.receipt('first'); self.observe()
         self.assertEqual(self.observe()['remaining_authorization_micro'], 0)
         self.denied('ALLOWANCE_HEADROOM')
@@ -185,24 +185,24 @@ os._exit(23)  # No orderly worker cleanup, receipt or cancellation.
                            allowance_micro=60_000_000, reason='Not authorized')
         with self.assertRaises(ValueError):
             f.costs.approve(f.job['id'], actor='operator', is_admin=True,
-                           allowance_micro=1050, reason='Cannot reset authorization')
+                           allowance_micro=700, reason='Cannot reset authorization')
         self.assertEqual(before, f.costs.snapshot(f.job['id']))
         f.costs.approve(f.job['id'], actor='offline-operator', is_admin=True,
-                       allowance_micro=2100, reason='Explicit synthetic increase by 1050 micro-USD')
+                       allowance_micro=1400, reason='Explicit synthetic increase by 700 micro-USD')
         f.store = ControlStore(f.store.path); f.costs = BenchmarkCost(f.store)
         f.costs.register_execution(f.job['id'], 'execution_resume', 'session_one', 'a'*40)
         view = self.observe()
-        self.assertEqual(view['estimated_model_consumption_micro'], 1050)
-        self.assertEqual(view['remaining_authorization_micro'], 1050)
+        self.assertEqual(view['estimated_model_consumption_micro'], 700)
+        self.assertEqual(view['remaining_authorization_micro'], 700)
         f.costs.reserve(f.job, f.lease['token'], f.directory, 'execution_resume',
             dict(id='second', provider=PROVIDER, model=MODEL, pricingVersion=PRICING,
-                 purpose='configuration', upperMicro=1050))
+                 purpose='configuration', upperMicro=700))
         self.observe()
         f.costs.begin_dispatch(f.job, f.lease['token'], f.directory, 'execution_resume', 'second')
         self.provider(); self.observe()
         f.costs.settle('execution_resume', 'second', {'usage': dict(input=100, output=20,
-            cacheRead=1000, cacheWrite=40, totalTokens=1160), 'costMicro': 1050})
+            cacheRead=1000, cacheWrite=40, totalTokens=1160), 'costMicro': 700})
         self.observe()
-        self.assertEqual(self.observe()['estimated_model_consumption_micro'], 2100)
+        self.assertEqual(self.observe()['estimated_model_consumption_micro'], 1400)
         self.denied('ALLOWANCE_HEADROOM')
         self.assertEqual(self.provider.call_count, 2)

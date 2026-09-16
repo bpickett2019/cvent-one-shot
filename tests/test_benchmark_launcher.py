@@ -57,7 +57,7 @@ class BenchmarkLauncherTests(unittest.TestCase):
                     'Offline continuation only. No browser.'], cwd=directory, env=env,
                     text=True, capture_output=True, timeout=120)
                 self.assertEqual(costs.snapshot(job['id'])['logical_build_id'], before['logical_build_id'])
-                self.assertEqual(costs.snapshot(job['id'])['cumulative_cost_micro'], before['cumulative_cost_micro'] + 45)
+                self.assertEqual(costs.snapshot(job['id'])['cumulative_cost_micro'], before['cumulative_cost_micro'] + 30)
             snapshot = costs.snapshot(job['id'])
             checks = [json.loads(line) for line in (directory/'offline-meter-checks.jsonl').read_text().splitlines()]
             self.assertTrue(checks)
@@ -75,7 +75,7 @@ class BenchmarkLauncherTests(unittest.TestCase):
         completed, snapshot, trace, stopped = self.launch('normal')
         self.assertEqual(completed.returncode, 0, (completed.stdout+completed.stderr)[-5000:])
         self.assertEqual(snapshot['physical_attempts'], 1, completed.stdout+completed.stderr)
-        self.assertEqual(snapshot['cumulative_cost_micro'], 45)
+        self.assertEqual(snapshot['cumulative_cost_micro'], 30)
         self.assertEqual(snapshot['tokens']['input'], 10)
         self.assertTrue(snapshot['accounting_complete'])
         self.assertFalse(stopped)
@@ -94,6 +94,9 @@ class BenchmarkLauncherTests(unittest.TestCase):
         self.assertNotIn('skills/ego-browser', system)
         tools = {tool['name']: tool for tool in self.contract['tools']}
         self.assertEqual(set(tools), {'read','bash','cvent_open_event','cvent_login_handoff','cvent_job_update','cvent_finish'})
+        self.assertEqual(self.contract['model'], 'claude-sonnet-5')
+        self.assertEqual(self.contract['thinking']['type'], 'adaptive')
+        self.assertEqual(self.contract['output_config']['effort'], 'high')
         self.assertIn('No shell or Node.js imports', tools['bash']['description'])
         self.assertNotIn('upstream', tools['bash']['description'])
         mission = (ROOT/'PI_SIMPLE_PROMPT.md').read_text()
@@ -105,7 +108,7 @@ class BenchmarkLauncherTests(unittest.TestCase):
         completed, snapshot, trace, stopped = self.launch('normal', resume=True)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertEqual(snapshot['physical_attempts'], 2)
-        self.assertEqual(snapshot['cumulative_cost_micro'], 90)
+        self.assertEqual(snapshot['cumulative_cost_micro'], 60)
         self.assertEqual(len(snapshot['executions']), 2)
         self.assertEqual(len({e['session_id'] for e in snapshot['executions']}), 1)
         self.assertEqual(sum(r['kind'] == 'provider' for r in trace), 2)

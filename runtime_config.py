@@ -99,9 +99,9 @@ def pi_provider() -> str:
 
 
 def pi_model() -> str:
-    model = os.environ.get("CVENT_PI_MODEL", "claude-sonnet-4-6")
-    if model not in {"claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"}:
-        raise RuntimeError("CVENT_PI_MODEL must be claude-sonnet-4-6")
+    model = os.environ.get("CVENT_PI_MODEL", "claude-sonnet-5")
+    if model not in {"claude-sonnet-5", "anthropic/claude-sonnet-5"}:
+        raise RuntimeError("CVENT_PI_MODEL must be claude-sonnet-5")
     return model.split("/", 1)[-1]
 
 

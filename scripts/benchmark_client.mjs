@@ -2,8 +2,8 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const PRICING = 'sonnet-4-6-sdk-0.84.4-standard-5m-v1';
-export const PIN = { provider: 'anthropic', id: 'claude-sonnet-4-6' };
+export const PRICING = 'sonnet-5-sdk-0.84.4-standard-5m-v1';
+export const PIN = { provider: 'anthropic', id: 'claude-sonnet-5' };
 
 export function stopMarker(directory, code) {
   const safeCode = /^[A-Z][A-Z0-9_]{0,100}$/.test(code) ? code : 'MODEL_ADMISSION_FAILURE';
@@ -57,7 +57,7 @@ export function createBenchmarkClient({ env = process.env, fetchImpl = globalThi
 
 export function quoteBenchmark(model, _context, _options, { body } = {}) {
   if (model.provider !== PIN.provider || model.id !== PIN.id || model.contextWindow !== 1_000_000 || model.maxTokens !== 128_000 ||
-      model.cost.input !== 3 || model.cost.output !== 15 || model.cost.cacheRead !== .3 || model.cost.cacheWrite !== 3.75)
+      model.cost.input !== 2 || model.cost.output !== 10 || model.cost.cacheRead !== .2 || model.cost.cacheWrite !== 2.5)
     throw Object.assign(new Error('Pricing/catalog changed'), { code: 'PRICING_OR_MODEL_MISMATCH' });
   if (typeof body !== 'string') throw Object.assign(new Error('Uninspected transport body'), { code: 'UNSUPPORTED_PROVIDER_TRANSPORT' });
   const payload = JSON.parse(body);
@@ -66,17 +66,20 @@ export function quoteBenchmark(model, _context, _options, { body } = {}) {
     throw Object.assign(new Error('Unsupported payload'), { code: 'UNSUPPORTED_PROVIDER_PAYLOAD' });
   // This rate basis supports standard 5-minute caching only, not premium service
   // tiers, server tools or externally injected inference. No payload is persisted.
+  let cacheWritePossible = false;
   const inspect = value => {
     if (!value || typeof value !== 'object') return;
+    if (Object.hasOwn(value, 'cache_control')) cacheWritePossible = true;
     if (value.cache_control?.ttl && value.cache_control.ttl !== '5m') throw new Error('Unsupported cache pricing');
     for (const child of Object.values(value)) if (typeof child === 'object') inspect(child);
   };
   inspect(payload);
   if (payload.service_tier && payload.service_tier !== 'auto' || payload.tools?.some(t => t.type && t.type !== 'custom'))
     throw Object.assign(new Error('Unsupported paid auxiliary capability'), { code: 'AUXILIARY_INFERENCE_DISABLED' });
-  // Deliberately simple conservative headroom: full accepted model input window
-  // priced as a cache write, plus the actual allowed output (including thinking).
-  // We do not assume a cache hit or use average output as a spending guarantee.
-  const upperMicro = Math.ceil(model.contextWindow * 3.75 + payload.max_tokens * 15);
+  // Full catalog input ceiling, plus wire output cap (including thinking).
+  // Only an inspected payload with NO cache controls uses the fresh-input rate.
+  // Otherwise retain worst-case 5m creation pricing; never assume a cache hit.
+  const inputRate = cacheWritePossible ? model.cost.cacheWrite : model.cost.input;
+  const upperMicro = Math.ceil(model.contextWindow * inputRate + payload.max_tokens * model.cost.output);
   return { expectedMicro: upperMicro, upperMicro, pricingVersion: PRICING };
 }

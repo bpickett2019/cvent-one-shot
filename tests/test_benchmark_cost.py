@@ -51,11 +51,31 @@ class BenchmarkCostTests(unittest.TestCase):
     def test_cumulative_usage_and_duplicate_settlement(self):
         self.reserve(); self.dispatch(); self.receipt(); self.receipt()
         view = self.costs.snapshot(self.job['id'])
-        self.assertEqual(view['cumulative_cost_micro'], 1050)
+        self.assertEqual(view['cumulative_cost_micro'], 700)
         self.assertEqual(view['tokens']['totalTokens'], 1160)
         self.assertEqual(view['physical_attempts'], 1)
         self.assertTrue(view['accounting_complete'])
         self.assertEqual(view['context_tokens']['median'], 1140)
+
+    def test_sonnet5_profile_rates_and_production_allowance(self):
+        from benchmark_cost import INITIAL_ALLOWANCE, validate_configuration
+        from runtime_config import pi_model
+        self.assertEqual(MODEL, 'claude-sonnet-5')
+        self.assertEqual(PRICING, 'sonnet-5-sdk-0.84.4-standard-5m-v1')
+        self.assertEqual(INITIAL_ALLOWANCE, 50_000_000)
+        self.assertEqual(charge(dict(input=10, cacheRead=20, cacheWrite=30, output=4, totalTokens=64)), 139)
+        with patch.dict(os.environ, {'CVENT_PI_PROVIDER':'anthropic','CVENT_PI_MODEL':MODEL,
+                                    'CVENT_EXECUTION_MODE':'simple','CVENT_PI_THINKING':'high'}):
+            validate_configuration()
+            self.assertEqual(pi_model(), MODEL)
+            with patch.dict(os.environ, {'CVENT_PI_MODEL':'claude-sonnet-4-6'}):
+                with self.assertRaises(RuntimeError): validate_configuration()
+            with patch.dict(os.environ, {'CVENT_PI_THINKING':'low'}):
+                with self.assertRaises(BenchmarkDenied): validate_configuration()
+        with self.assertRaisesRegex(BenchmarkDenied, 'PRICING_OR_MODEL_MISMATCH'):
+            self.costs.reserve(self.job, self.lease['token'], self.directory, 'execution_one', {
+                'id':'old-model','provider':PROVIDER,'model':'claude-sonnet-4-6',
+                'pricingVersion':PRICING,'purpose':'configuration','upperMicro':1000})
 
     def test_pause_blocks_every_permitted_purpose(self):
         for change in ({'ownership': 'USER'}, {'desiredOwnership': 'USER'}, {'authWaiting': True},
@@ -138,7 +158,7 @@ class BenchmarkCostTests(unittest.TestCase):
         # headroom denies admission. The extra allowance is explicit, not a reset.
         for index in range(8):
             self.reserve(f'r{index}', upper=6_000_000); self.dispatch(f'r{index}')
-            usage = {'input': 0, 'output': 400000, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 400000}
+            usage = {'input': 0, 'output': 600000, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 600000}
             self.costs.settle('execution_one', f'r{index}', {'usage': usage, 'costMicro': 6_000_000})
         with self.assertRaisesRegex(BenchmarkDenied, 'ALLOWANCE_HEADROOM'): self.reserve('next')
         view = self.costs.approve(self.job['id'], actor='operator', is_admin=True, allowance_micro=60_000_000, reason='Explicit extra $10')
@@ -158,7 +178,7 @@ class BenchmarkCostTests(unittest.TestCase):
         other = self.store.create_job(self.owner, self.event, 'again.xlsx')
         other_dir = self.root/'other'; other_dir.mkdir(); (other_dir/'input.xlsx').write_bytes(b'offline workbook')
         self.assertEqual(self.costs.bind(other, other_dir), self.build_id)
-        self.assertEqual(BenchmarkCost(ControlStore(self.store.path)).snapshot(other['id'])['cumulative_cost_micro'], 1050)
+        self.assertEqual(BenchmarkCost(ControlStore(self.store.path)).snapshot(other['id'])['cumulative_cost_micro'], 700)
         (other_dir/'input.xlsx').write_bytes(b'changed')
         with self.assertRaisesRegex(BenchmarkDenied, 'BINDING_CHANGED'): self.costs.bind(other, other_dir)
 
@@ -233,7 +253,7 @@ class BenchmarkCostTests(unittest.TestCase):
     def test_pricing_mismatch_records_truth_and_blocks(self):
         self.reserve(upper=1); self.dispatch()
         self.receipt()
-        self.assertEqual(self.costs.snapshot(self.job['id'])['cumulative_cost_micro'], 1050)
+        self.assertEqual(self.costs.snapshot(self.job['id'])['cumulative_cost_micro'], 700)
         with self.assertRaisesRegex(BenchmarkDenied, 'PRICING_RECONCILIATION'): self.reserve('next')
 
     def test_disabled_inference_probe_has_zero_network(self):

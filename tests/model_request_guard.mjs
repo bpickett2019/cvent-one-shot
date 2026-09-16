@@ -165,8 +165,20 @@ try {
   const runtime = await sdk.ModelRuntime.create({ credentials: new ai.InMemoryCredentialStore(), modelsPath: null,
     allowModelNetwork: false, refreshOnCreate: false });
   await runtime.setRuntimeApiKey('anthropic', 'offline-test-not-a-real-key');
-  const actualModel = runtime.getModel('anthropic', 'claude-sonnet-4-6');
+  const actualModel = runtime.getModel('anthropic', 'claude-sonnet-5');
   assert(actualModel);
+  const wire={model:actualModel.id,stream:true,max_tokens:64,messages:[{role:'user',content:'Reply only OK.'}]};
+  const quote=payload=>quoteBenchmark(actualModel,{}, {}, {body:JSON.stringify(payload)});
+  assert.equal(quote(wire).upperMicro,2000640);
+  assert.equal(quote({...wire,cache_control:{type:'ephemeral'}}).upperMicro,2500640);
+  assert.equal(quote({...wire,system:[{type:'text',text:'Cache fixture',cache_control:{type:'ephemeral',ttl:'5m'}}]}).upperMicro,2500640);
+  assert.equal(quote({...wire,messages:[{role:'user',content:[{type:'text',text:'OK',cache_control:{type:'ephemeral'}}]}]}).upperMicro,2500640);
+  assert.equal(quote({...wire,tools:[{name:'fixture',input_schema:{type:'object'},cache_control:{type:'ephemeral'}}]}).upperMicro,2500640);
+  assert.equal(quote({...wire,max_tokens:128000,cache_control:{type:'ephemeral'}}).upperMicro,3780000);
+  assert.throws(()=>quote({...wire,cache_control:{type:'ephemeral',ttl:'1h'}}),/Unsupported cache pricing/);
+  assert.throws(()=>quote({...wire,tools:[{type:'web_search_20250305',name:'web_search'}]}),/auxiliary/);
+  assert.throws(()=>quoteBenchmark(runtime.getModel('anthropic','claude-sonnet-4-6'),{}, {},{body:JSON.stringify(wire)}),/Pricing\/catalog changed/);
+  assert.throws(()=>quoteBenchmark({...actualModel,cost:{...actualModel.cost,input:2.01}}, {}, {},{body:JSON.stringify(wire)}),/Pricing\/catalog changed/);
   const f = fixture();
   const sse = [
     ['message_start', { type: 'message_start', message: { id: 'offline', type: 'message', role: 'assistant', model: actualModel.id,
@@ -219,7 +231,33 @@ try {
     runtime.streamSimple.bind(runtime), { enabled: true, maxRetries: 2, baseDelayMs: 1 });
   assert.equal(deniedSummary.stopReason, 'error');
   assert.equal(actualRequests, 2, 'Auth waiting must block ordinary inference, retries and compaction');
-  console.log('Guarded transport tests passed, including installed SDK Anthropic + compaction; zero real network.');
+  // Exact proposed micro profile through the SAME guard and installed adapter.
+  // This proves one offline invocation, not a restart-durable live request cap.
+  const microRuntime=await sdk.ModelRuntime.create({credentials:new ai.InMemoryCredentialStore(),modelsPath:null,allowModelNetwork:false});
+  await microRuntime.setRuntimeApiKey('anthropic','offline-test-not-a-real-key');
+  const micro=fixture();let microCalls=0;
+  installGuardedRuntime(microRuntime,{...micro.config,pinnedModel:actualModel,quote:quoteBenchmark,requireAnthropicReceipt:true,
+    allowedEndpoints:['https://api.anthropic.com/v1/messages'],fetchImpl:async(_url,options)=>{
+      microCalls++;
+      const payload=JSON.parse(options.body);
+      assert.equal(payload.model,'claude-sonnet-5');
+      assert.equal(payload.max_tokens,64);
+      assert.equal(payload.thinking.type,'adaptive');
+      assert.equal(payload.output_config.effort,'low');
+      assert.equal(payload.system,undefined);assert.equal(payload.tools,undefined);
+      assert.deepEqual(payload.messages,[{role:'user',content:'Reply only OK.'}]);
+      assert(!JSON.stringify(payload).includes('cache_control'));
+      return new Response(sse,{status:200,headers:{'content-type':'text/event-stream'}});
+    }});
+  const microResult=await microRuntime.completeSimple(actualModel,{messages:[{role:'user',content:'Reply only OK.',timestamp:0}]},
+    {reasoning:'low',maxTokens:64,cacheRetention:'none',maxRetries:0,transport:'sse'});
+  assert.equal(microResult.stopReason,'stop',microResult.errorMessage);
+  assert.equal(microCalls,1);assert.equal(micro.requests.size,1);
+  const microRequest=[...micro.requests.values()][0];
+  assert.equal(microRequest.meta.upperMicro,2000640);
+  assert.equal(microRequest.state,'SETTLED');
+  assert.equal(microRequest.settlement.costMicro,30);
+  console.log('Guarded Sonnet 5 transport, cache/no-cache pricing, low-effort micro profile and compaction PASS; zero real network.');
 } finally {
   globalThis.fetch = originalFetch;
 }
